@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+source "$LAB_ROOT/lib/common.sh"
+source "$LAB_ROOT/lib/omni.sh"
+source "$LAB_ROOT/lib/pve-api.sh"
+source "$LAB_ROOT/lib/cap.sh"
+source "$LAB_ROOT/lib/proxmox-layer.sh"
+source "$LAB_ROOT/lib/machines-layer.sh"
+source "$LAB_ROOT/lib/site-layer.sh"
+source "$LAB_ROOT/lib/tunnel-layer.sh"
+source "$LAB_ROOT/lib/failover-layer.sh"
+source "$LAB_ROOT/lib/students-layer.sh"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: lab gate
+       lab proxmox up|verify|down
+       lab machines up
+       lab cluster up|prove-reconnect
+       lab site up|verify
+       lab tunnel up|verify
+       lab up
+       lab failover [worker-a|worker-b]
+       lab students create <count>|delete
+       lab reset
+EOF
+  exit 2
+}
+
+main() {
+  (($# >= 1)) || usage
+  case "$1" in
+    gate)
+      lab_load_config
+      lab_lock "$*"
+      cap_gate
+      ;;
+    proxmox)
+      (($# == 2)) || usage
+      lab_lock "$*"
+      case "$2" in
+        up) proxmox_up ;;
+        verify) proxmox_verify ;;
+        down) proxmox_down ;;
+        *) usage ;;
+      esac
+      ;;
+    machines)
+      if (($# != 2)) || [[ "$2" != up ]]; then
+        usage
+      fi
+      lab_lock "$*"
+      machines_up
+      ;;
+    cluster)
+      (($# == 2)) || usage
+      lab_lock "$*"
+      case "$2" in
+        up) cluster_up ;;
+        prove-reconnect) cluster_prove_reconnect ;;
+        *) usage ;;
+      esac
+      ;;
+    site)
+      (($# == 2)) || usage
+      lab_lock "$*"
+      case "$2" in
+        up) site_up ;;
+        verify) site_verify ;;
+        *) usage ;;
+      esac
+      ;;
+    tunnel)
+      (($# == 2)) || usage
+      lab_lock "$*"
+      case "$2" in
+        up) tunnel_up ;;
+        verify)
+          lab_load_config
+          cf_load_config
+          site_require_cluster
+          tunnel_verify
+          ;;
+        *) usage ;;
+      esac
+      ;;
+    up)
+      lab_lock "$*"
+      machines_up
+      cluster_up
+      site_up
+      tunnel_up
+      ;;
+    failover)
+      lab_lock "$*"
+      failover_run "${2:-worker-b}"
+      ;;
+    students)
+      (($# >= 2)) || usage
+      lab_lock "$*"
+      case "$2" in
+        create) students_create "${3:-}" ;;
+        delete) students_delete ;;
+        *) usage ;;
+      esac
+      ;;
+    reset)
+      lab_lock "$*"
+      lab_reset
+      ;;
+    *)
+      usage
+      ;;
+  esac
+}
+
+main "$@"
