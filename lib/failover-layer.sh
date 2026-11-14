@@ -3,7 +3,19 @@ readonly FAILOVER_SETTLE_SECONDS=15
 readonly FAILOVER_RECOVERY_TIMEOUT=300
 readonly FAILOVER_RETURN_TIMEOUT=420
 
+FAILOVER_IMAGE_SETTLE_SECONDS="${FAILOVER_IMAGE_SETTLE_SECONDS:-120}"
 FAILOVER_PROBE_PID=""
+
+failover_wait_images_settled() {
+  local raw newest remaining
+  raw="$(lab_kubectl get pods -l 'app in (hello,cloudflared)' -o json)" || return 1
+  newest="$(jq -er '[.items[].status.startTime | select(. != null) | fromdate] | max' <<<"$raw")" || return 1
+  remaining=$((newest + FAILOVER_IMAGE_SETTLE_SECONDS - $(date +%s)))
+  if ((remaining > 0)); then
+    log "waiting ${remaining}s so recently pulled images reach disk before the power cut"
+    sleep "$remaining"
+  fi
+}
 
 failover_worker_index() {
   case "$1" in
@@ -187,6 +199,8 @@ failover_run() {
   [[ "$(site_distinct_nodes default app=hello)" == 2 ]] || die "hello replicas are not spread across both workers"
   [[ "$(site_distinct_nodes default app=cloudflared)" == 2 ]] || die "cloudflared replicas are not spread across both workers"
   coredns_on="$(lab_kubectl -n kube-system get pods -l k8s-app=kube-dns -o json | jq -r --arg node "$node" '[.items[] | select(.spec.nodeName == $node)] | length')"
+
+  failover_wait_images_settled || die "could not read pod start times before the failover"
 
   failover_probe_loop "$FAILOVER_DIR/probe.csv" "$url" &
   FAILOVER_PROBE_PID=$!

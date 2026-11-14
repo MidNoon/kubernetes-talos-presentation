@@ -174,6 +174,8 @@ Your site is now public, and your cluster still accepts no inbound connections. 
 
 ## Break a worker
 
+Give your site at least two minutes after your last deployment before you do this. New container images reach the disk in the background, and cutting the power right after a download can leave a damaged copy behind.
+
 Keep your site open where you can see it, and watch the pods in a terminal:
 
 ```bash

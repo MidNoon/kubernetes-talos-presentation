@@ -18,8 +18,9 @@ Automation and teaching material for a university session. Students boot Talos L
 ./lab students create <count>|delete    # pre-create student tunnels and tokens
 ./lab reset                             # remove everything above Proxmox
 
+tools/site-check.sh [host:port ...]     # KVM, gateway, DNS and egress checks on a candidate site host
 tests/cap-guard.sh                      # stubbed guard tests, no real services
-shellcheck -s bash -x -e SC1090,SC1091,SC2034,SC2154,SC2016,SC2317,SC2024 lab lib/*.sh tests/cap-guard.sh
+shellcheck -s bash -x -e SC1090,SC1091,SC2034,SC2154,SC2016,SC2317,SC2024 lab lib/*.sh tests/cap-guard.sh tools/site-check.sh
 ```
 
 A full rehearsal is `./lab proxmox up`, `./lab up`, `./lab failover`, `./lab reset`. `./lab up` takes about 10 minutes and `./lab reset` about 5, nearly all of it waiting for Omni to notice the VMs have stopped.
@@ -36,6 +37,7 @@ A full rehearsal is `./lab proxmox up`, `./lab up`, `./lab failover`, `./lab res
 - `lib/site-layer.sh`, `lib/tunnel-layer.sh`, `lib/failover-layer.sh` and `lib/students-layer.sh` hold the remaining layers. `lib/tunnel-layer.sh` is the only path to `cf`, through `cf_query`.
 - `manifests/` holds the Kubernetes manifests students apply unchanged.
 - `docker/pve-assistant/` builds the image that prepares the unattended Proxmox installer.
+- `tools/site-check.sh` runs standalone on a Proxmox host or desktop at a candidate site, with no dependency on the rest of the repo.
 
 ## Configuration and state
 
@@ -101,6 +103,7 @@ The Omni account can hold a real cluster and the service account key is Admin, s
 - Installed machines hold persisted unique tokens and reconnect after a restart with the join token revoked. Machines still in maintenance mode depend on the join token.
 - A stopped node's Ready condition becomes `Unknown`, not `False`, after about 50 seconds.
 - During those 50 seconds the Service still routes to the dead pod, so some requests fail. Failures stop once the node is marked down. Expect 10 to 13 failures from a once-a-second probe with a 3 second timeout.
+- Hard-stopping a node within about a minute of pulling an image can leave a damaged copy on its disk, seen as `exec format error` and `CrashLoopBackOff` once the node returns. Deleting the pod does not help, because the damaged image stays on that node. `kubectl set image` to a different version pulls clean layers. `failover_run` waits until the newest pod is 120 seconds old to avoid it.
 - `tolerationSeconds: 30` brings replacements up about 80 seconds after the stop. The Kubernetes default is 300 seconds.
 - `whenUnsatisfiable: DoNotSchedule` with `nodeTaintsPolicy: Honor` spreads replicas strictly and still lets the replacement schedule on the surviving worker, because the dead node's untolerated taint removes it from the calculation.
 - Pods do not move back when a worker returns. `kubectl rollout restart` rebalances them, and `matchLabelKeys: pod-template-hash` makes that placement clean.
@@ -116,3 +119,6 @@ The Omni account can hold a real cluster and the service account key is Admin, s
 - Outbound UDP to the WireGuard port shown in the Omni account's `siderolinkapiconfigs`. Each account has its own port. If UDP is blocked, create the preset with `--use-siderolink-grpc-tunnel` to carry that traffic over 443.
 - Outbound UDP and TCP 7844 for `cloudflared`, which has no alternative port.
 - A Proxmox bridge with DHCP and outbound internet.
+- KVM inside the Proxmox host, meaning the `vmx` or `svm` flag and `/dev/kvm`, when Proxmox itself runs as a VM.
+
+`tools/site-check.sh` tests the TCP side of these from a host on the site. Pass the Omni account host as an extra `host:443` argument. It cannot test the UDP ports, because nothing answers a bare UDP probe.

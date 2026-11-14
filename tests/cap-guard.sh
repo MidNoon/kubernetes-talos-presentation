@@ -766,6 +766,32 @@ test_cf_allowlist_refuses_team_hostname_in_other_zone() {
   cf_refused dns records create -z zone.example --body '{"name":"team01.other.example","type":"CNAME"}'
 }
 
+test_failover_waits_after_a_recent_pod_start() {
+  local stamp begin
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  lab_kubectl() { printf '{"items":[{"status":{"startTime":"2020-01-01T00:00:00Z"}},{"status":{"startTime":"%s"}}]}\n' "$stamp"; }
+  FAILOVER_IMAGE_SETTLE_SECONDS=2
+  begin=$SECONDS
+  failover_wait_images_settled || return 1
+  ((SECONDS - begin >= 1))
+}
+test_failover_does_not_wait_for_old_pods() {
+  local begin
+  lab_kubectl() { printf '%s\n' '{"items":[{"status":{"startTime":"2020-01-01T00:00:00Z"}}]}'; }
+  FAILOVER_IMAGE_SETTLE_SECONDS=30
+  begin=$SECONDS
+  failover_wait_images_settled || return 1
+  ((SECONDS - begin < 5))
+}
+test_failover_settle_fails_when_pods_are_unreadable() {
+  lab_kubectl() { return 1; }
+  ! failover_wait_images_settled
+}
+test_failover_settle_fails_with_no_pods() {
+  lab_kubectl() { printf '%s\n' '{"items":[]}'; }
+  ! failover_wait_images_settled
+}
+
 test_failover_targets_only_workers() {
   [[ "$(failover_worker_index worker-a)" == 1 && "$(failover_worker_index worker-b)" == 2 ]] || return 1
   ! failover_worker_index control-plane
