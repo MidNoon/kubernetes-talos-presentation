@@ -204,7 +204,7 @@ failover_run() {
 
   failover_probe_loop "$FAILOVER_DIR/probe.csv" "$url" &
   FAILOVER_PROBE_PID=$!
-  trap failover_stop_probe EXIT
+  lab_on_exit failover_stop_probe
   log "target is $name on node $node, which runs $coredns_on CoreDNS pods, probing $url for ${FAILOVER_BASELINE_SECONDS}s first"
   sleep "$FAILOVER_BASELINE_SECONDS"
 

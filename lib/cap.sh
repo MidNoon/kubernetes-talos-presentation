@@ -358,7 +358,7 @@ cap_watchdog_start() {
   cap_watchdog_snapshot || return 1
   cap_watchdog_loop &
   LAB_WATCHDOG_PID=$!
-  trap cap_watchdog_stop EXIT
+  lab_on_exit cap_watchdog_stop
   log "cap watchdog running as pid $LAB_WATCHDOG_PID"
 }
 

@@ -10,12 +10,12 @@ lab_tunnel_token_file() {
 }
 
 cf_tunnel_name_owned() {
-  [[ "$1" == talos-lab || "$1" =~ ^talos-student-[0-9]{2}$ ]]
+  [[ "$1" == talos-lab || "$1" == talos-lab-host || "$1" =~ ^talos-student-[0-9]{2}$ ]]
 }
 
 cf_hostname_owned() {
   [[ -n "${CF_CONFIGURED_HOSTNAME:-}" && "$1" == "$CF_CONFIGURED_HOSTNAME" ]] && return 0
-  [[ "$1" =~ ^team[0-9]{2}\. && "${1#*.}" == "$LAB_TUNNEL_ZONE" ]]
+  [[ "$1" =~ ^(team[0-9]{2}|omni|kube|auth|pve)\. && "${1#*.}" == "$LAB_TUNNEL_ZONE" ]]
 }
 
 cf_load_config() {

@@ -6,7 +6,7 @@ readonly PROXMOX_SUBNET=10.77.0.0/24
 readonly PROXMOX_GATEWAY=10.77.0.1
 readonly PROXMOX_ADDRESS=10.77.0.10
 readonly PROXMOX_MAC=52:54:00:1a:b5:10
-readonly PROXMOX_MEMORY_GIB=16
+readonly PROXMOX_MEMORY_GIB=24
 readonly PROXMOX_VCPUS=8
 readonly PROXMOX_DISK_GIB=200
 readonly PROXMOX_NODE=pve
@@ -27,6 +27,7 @@ readonly PROXMOX_REQUIRED_PRIVILEGES=(
 )
 
 PROXMOX_STATE="$LAB_STATE/proxmox"
+PROXMOX_SSH_DIR="$PROXMOX_STATE/ssh"
 PROXMOX_TARGET="$LAB_STATE/pve-target.env"
 PROXMOX_API="https://$PROXMOX_ADDRESS:8006/api2/json"
 
@@ -88,6 +89,7 @@ fqdn = "$PROXMOX_NODE.talos-lab.internal"
 mailto = "lab@talos-lab.invalid"
 timezone = "UTC"
 root-password-hashed = "$1"
+root-ssh-keys = ["$2"]
 
 [network]
 source = "from-dhcp"
@@ -109,7 +111,11 @@ proxmox_build_installer() {
   if [[ ! -s "$hash" ]]; then
     openssl passwd -6 -stdin <"$password" >"$hash"
   fi
-  answer="$(proxmox_render_answer "$(<"$hash")")"
+  mkdir -p "$PROXMOX_SSH_DIR"
+  if [[ ! -s "$PROXMOX_SSH_DIR/id_ed25519" ]]; then
+    ssh-keygen -q -t ed25519 -N '' -C talos-lab -f "$PROXMOX_SSH_DIR/id_ed25519"
+  fi
+  answer="$(proxmox_render_answer "$(<"$hash")" "$(<"$PROXMOX_SSH_DIR/id_ed25519.pub")")"
   if [[ ! -f "$build/answer.toml" || "$(<"$build/answer.toml")" != "$answer" ]]; then
     printf '%s\n' "$answer" >"$build/answer.toml"
     rm -f "$build/$PROXMOX_ISO_VOLUME"
@@ -351,8 +357,21 @@ proxmox_bootstrap_api() {
     printf 'PVE_ISO_STORAGE=%q\n' local
     printf 'PVE_DISK_STORAGE=%q\n' local-lvm
     printf 'PVE_BRIDGE=%q\n' vmbr0
+    printf 'PVE_SSH=%q\n' "root@$PROXMOX_ADDRESS"
+    printf 'PVE_SSH_KEY=%q\n' "$PROXMOX_SSH_DIR/id_ed25519"
+    printf 'PVE_SSH_KNOWN_HOSTS=%q\n' "$PROXMOX_SSH_DIR/known_hosts"
   } >"$PROXMOX_TARGET"
   log "API token written to $PROXMOX_TARGET"
+}
+
+proxmox_pin_ssh() {
+  local known="$PROXMOX_SSH_DIR/known_hosts" scanned
+  if [[ ! -s "$known" ]]; then
+    scanned="$(ssh-keyscan -T 10 -t ed25519 "$PROXMOX_ADDRESS" 2>/dev/null)"
+    [[ -n "$scanned" ]] || die "could not read the SSH host key of $PROXMOX_ADDRESS"
+    printf '%s\n' "$scanned" >"$known"
+    log "SSH host key of $PROXMOX_ADDRESS recorded in $known"
+  fi
 }
 
 proxmox_verify() {
@@ -388,7 +407,9 @@ proxmox_verify() {
   egress="$(proxmox_root_api GET "/nodes/$PVE_NODE/query-url-metadata?url=https%3A%2F%2Fenterprise.proxmox.com%2Fiso%2FSHA256SUMS")"
   jq -e '.data' <<<"$egress" >/dev/null || die "Proxmox node could not reach enterprise.proxmox.com: $egress"
 
-  log "proxmox verified: version $version, token privileges complete, $PVE_BRIDGE active, nested virtualization exposed, outbound https working"
+  pve_ssh pveversion >/dev/null || die "root SSH to $PVE_SSH with $PVE_SSH_KEY failed"
+
+  log "proxmox verified: version $version, token privileges complete, $PVE_BRIDGE active, nested virtualization exposed, outbound https working, root SSH working"
 }
 
 proxmox_up() {
@@ -400,6 +421,7 @@ proxmox_up() {
   proxmox_ensure_storage
   proxmox_ensure_vm
   proxmox_wait_for_api
+  proxmox_pin_ssh
   if ! { [[ -r "$PROXMOX_TARGET" ]] && pve_load_target && pve_api GET /version >/dev/null 2>&1; }; then
     proxmox_bootstrap_api
   fi
@@ -450,7 +472,7 @@ proxmox_down() {
 
   proxmox_ufw delete
   log "ufw rules for $PROXMOX_BRIDGE removed"
-  rm -f "$PROXMOX_TARGET"
+  rm -f "$PROXMOX_TARGET" "$PROXMOX_SSH_DIR/known_hosts"
 
   virt dominfo "$PROXMOX_VM" >/dev/null 2>&1 && leftovers+=("domain $PROXMOX_VM")
   virt pool-info "$PROXMOX_POOL" >/dev/null 2>&1 && leftovers+=("pool $PROXMOX_POOL")

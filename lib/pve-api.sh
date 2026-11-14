@@ -5,12 +5,48 @@ pve_load_target() {
     return 1
   }
   source "$target"
-  for var in PVE_URL PVE_NODE PVE_TOKEN_ID PVE_TOKEN_SECRET PVE_TLS_PIN PVE_ISO_STORAGE PVE_DISK_STORAGE PVE_BRIDGE; do
+  for var in PVE_URL PVE_NODE PVE_TOKEN_ID PVE_TOKEN_SECRET PVE_TLS_PIN PVE_ISO_STORAGE PVE_DISK_STORAGE PVE_BRIDGE PVE_SSH PVE_SSH_KEY PVE_SSH_KNOWN_HOSTS; do
     [[ -n "${!var:-}" ]] || {
       fail "Proxmox target file $target does not set $var"
       return 1
     }
   done
+}
+
+pve_ssh_options() {
+  PVE_SSH_OPTIONS=(
+    -i "$PVE_SSH_KEY"
+    -o IdentitiesOnly=yes
+    -o BatchMode=yes
+    -o StrictHostKeyChecking=yes
+    -o UserKnownHostsFile="$PVE_SSH_KNOWN_HOSTS"
+    -o ConnectTimeout=10
+    -o ServerAliveInterval=15
+  )
+}
+
+pve_ssh() {
+  pve_ssh_options
+  ssh "${PVE_SSH_OPTIONS[@]}" "$PVE_SSH" "$@"
+}
+
+pve_ssh_forward_open() {
+  local socket="$1" spec="$2"
+  pve_ssh_options
+  if [[ -S "$socket" ]]; then
+    ssh "${PVE_SSH_OPTIONS[@]}" -S "$socket" -O exit "$PVE_SSH" >/dev/null 2>&1 || rm -f "$socket"
+  fi
+  ssh "${PVE_SSH_OPTIONS[@]}" -M -S "$socket" -f -N -o ExitOnForwardFailure=yes -L "$spec" "$PVE_SSH" 2>/dev/null
+}
+
+pve_ssh_forward_close() {
+  pve_ssh_options
+  ssh "${PVE_SSH_OPTIONS[@]}" -S "$1" -O exit "$PVE_SSH" >/dev/null 2>&1 || true
+}
+
+pve_scp() {
+  pve_ssh_options
+  scp -q "${PVE_SSH_OPTIONS[@]}" "$@"
 }
 
 pve_api() {

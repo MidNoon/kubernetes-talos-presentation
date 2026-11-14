@@ -1,4 +1,21 @@
 LAB_STATE="${LAB_STATE:-$LAB_ROOT/.lab}"
+LAB_EXIT_HOOKS=()
+
+lab_on_exit() {
+  local hook
+  for hook in "${LAB_EXIT_HOOKS[@]}"; do
+    [[ "$hook" == "$1" ]] && return 0
+  done
+  LAB_EXIT_HOOKS+=("$1")
+  trap lab_run_exit_hooks EXIT
+}
+
+lab_run_exit_hooks() {
+  local hook
+  for hook in "${LAB_EXIT_HOOKS[@]}"; do
+    "$hook" || true
+  done
+}
 
 log() {
   printf '%s %s\n' "$(date +%T)" "$*" >&2

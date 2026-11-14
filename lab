@@ -14,11 +14,15 @@ source "$LAB_ROOT/lib/site-layer.sh"
 source "$LAB_ROOT/lib/tunnel-layer.sh"
 source "$LAB_ROOT/lib/failover-layer.sh"
 source "$LAB_ROOT/lib/students-layer.sh"
+source "$LAB_ROOT/lib/host-layer.sh"
+source "$LAB_ROOT/lib/seats-layer.sh"
 
 usage() {
   cat >&2 <<'EOF'
 usage: lab gate
        lab proxmox up|verify|down
+       lab host up|verify|down
+       lab seats create <count>
        lab machines up
        lab cluster up|prove-reconnect
        lab site up|verify
@@ -48,6 +52,26 @@ main() {
         down) proxmox_down ;;
         *) usage ;;
       esac
+      ;;
+    host)
+      (($# == 2)) || usage
+      lab_lock "$*"
+      case "$2" in
+        up) host_up ;;
+        verify)
+          host_load_config
+          host_verify
+          ;;
+        down) host_down ;;
+        *) usage ;;
+      esac
+      ;;
+    seats)
+      if (($# != 3)) || [[ "$2" != create ]]; then
+        usage
+      fi
+      lab_lock "$*"
+      seats_create "$3"
       ;;
     machines)
       if (($# != 2)) || [[ "$2" != up ]]; then

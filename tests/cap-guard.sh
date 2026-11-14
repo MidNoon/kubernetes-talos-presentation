@@ -226,7 +226,7 @@ load_libs() {
   LAB_TUNNEL_DELETE_ATTEMPTS=2
   LAB_TUNNEL_DELETE_DELAY=0
   LAB_PVE_TARGET="$WORK/pve-target.env"
-  printf 'PVE_URL=https://x\nPVE_NODE=pve\nPVE_TOKEN_ID=t\nPVE_TOKEN_SECRET=s\nPVE_TLS_PIN=p\nPVE_ISO_STORAGE=local\nPVE_DISK_STORAGE=local-lvm\nPVE_BRIDGE=vmbr0\n' >"$LAB_PVE_TARGET"
+  printf 'PVE_URL=https://x\nPVE_NODE=pve\nPVE_TOKEN_ID=t\nPVE_TOKEN_SECRET=s\nPVE_TLS_PIN=p\nPVE_ISO_STORAGE=local\nPVE_DISK_STORAGE=local-lvm\nPVE_BRIDGE=vmbr0\nPVE_SSH=root@x\nPVE_SSH_KEY=k\nPVE_SSH_KNOWN_HOSTS=h\n' >"$LAB_PVE_TARGET"
   pve_api() {
     printf '%s %s\n' "$1" "$2" >>"$FAKE/pve-calls"
     case "$1 $2" in
@@ -764,6 +764,35 @@ test_cf_allowlist_refuses_unowned_hostname_even_when_current() {
 test_cf_allowlist_refuses_team_hostname_in_other_zone() {
   LAB_TUNNEL_HOSTNAME=team01.other.example
   cf_refused dns records create -z zone.example --body '{"name":"team01.other.example","type":"CNAME"}'
+}
+test_cf_allowlist_permits_host_tunnel_and_hostnames() {
+  local label
+  LAB_TUNNEL_NAME=talos-lab-host
+  cf_allowed tunnels create --name talos-lab-host --config-source cloudflare || return 1
+  for label in omni kube auth pve; do
+    LAB_TUNNEL_HOSTNAME="$label.zone.example"
+    cf_allowed dns records create -z zone.example --body "{\"name\":\"$label.zone.example\",\"type\":\"CNAME\"}" || return 1
+  done
+}
+test_cf_allowlist_refuses_host_hostname_in_other_zone() {
+  LAB_TUNNEL_HOSTNAME=omni.other.example
+  cf_refused dns records create -z zone.example --body '{"name":"omni.other.example","type":"CNAME"}'
+}
+test_cf_allowlist_refuses_deeper_host_hostname() {
+  LAB_TUNNEL_HOSTNAME=omni.lab.zone.example
+  cf_refused dns records create -z zone.example --body '{"name":"omni.lab.zone.example","type":"CNAME"}'
+}
+test_lab_exit_hooks_run_each_once() {
+  local out="$WORK/hooks"
+  : >"$out"
+  (
+    first() { printf 'first\n' >>"$out"; }
+    second() { printf 'second\n' >>"$out"; }
+    lab_on_exit first
+    lab_on_exit second
+    lab_on_exit first
+  )
+  [[ "$(paste -sd' ' "$out")" == "first second" ]]
 }
 
 test_failover_waits_after_a_recent_pod_start() {
