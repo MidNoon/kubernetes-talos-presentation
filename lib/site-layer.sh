@@ -18,21 +18,6 @@ site_capture_failure() {
   die "$reason. Context saved in $dir"
 }
 
-site_rebalance_coredns() {
-  local attempt nodes=0
-  for ((attempt = 1; attempt <= 4; attempt++)); do
-    lab_kubectl -n kube-system rollout restart deployment/coredns >/dev/null
-    lab_kubectl -n kube-system rollout status deployment/coredns --timeout="$SITE_ROLLOUT_TIMEOUT" >/dev/null ||
-      site_capture_failure "CoreDNS did not finish rolling out"
-    nodes="$(site_distinct_nodes kube-system k8s-app=kube-dns)" || site_capture_failure "could not read CoreDNS placement"
-    if ((nodes >= 2)); then
-      log "CoreDNS spread across $nodes nodes"
-      return 0
-    fi
-  done
-  site_capture_failure "CoreDNS stayed on $nodes node after $((attempt - 1)) restarts"
-}
-
 site_verify() {
   local nodes attempt body pod seen=""
   nodes="$(site_distinct_nodes default app=hello)" || site_capture_failure "could not read hello pod placement"
@@ -46,11 +31,3 @@ site_verify() {
   log "site verified: 2 replicas on 2 nodes, both answering"
 }
 
-site_up() {
-  [[ -s "$(lab_kubeconfig)" ]] || die "no kubeconfig at $(lab_kubeconfig), the cluster is not up"
-  site_rebalance_coredns
-  lab_kubectl apply -f "$LAB_ROOT/manifests/hello.yaml" >/dev/null
-  lab_kubectl rollout status deployment/hello --timeout="$SITE_ROLLOUT_TIMEOUT" >/dev/null ||
-    site_capture_failure "hello deployment did not finish rolling out"
-  site_verify
-}

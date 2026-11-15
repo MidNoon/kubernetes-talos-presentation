@@ -3,11 +3,16 @@ readonly SEAT_CT_MEMORY_MIB=1024
 readonly SEAT_CT_SWAP_MIB=512
 readonly SEAT_CT_CORES=2
 readonly SEAT_CT_DISK_GIB=4
+readonly SEAT_WS_MEMORY_MIB=1536
+readonly SEAT_WS_SWAP_MIB=512
+readonly SEAT_WS_CORES=2
+readonly SEAT_WS_DISK_GIB=8
+readonly SEAT_WS_PORT=8443
+readonly SEAT_WS_USER=student
 readonly SEAT_VM_ROLES=(cp worker-a worker-b)
-readonly SEAT_VM_MEMORY_MIB=(4096 3072 3072)
-readonly SEAT_VM_CORES=(2 2 2)
+readonly SEAT_VM_MEMORY_MIB=3072
+readonly SEAT_VM_CORES=2
 readonly SEAT_VM_DISK_GIB=32
-readonly SEAT_VM_MACS=(BC:24:11:1A:B5 BC:24:11:1A:B6 BC:24:11:1A:B7)
 readonly SEAT_EXTENSION=siderolabs/qemu-guest-agent
 readonly SEAT_PRESET=talos-lab
 readonly SEAT_OMNI_READY_TIMEOUT=300
@@ -34,6 +39,12 @@ seat_use() {
   SEAT_DHCP_END="10.88.$n.199"
   SEAT_CT_ID=$((9000 + n * 10))
   SEAT_CT_NAME="omni$SEAT"
+  SEAT_WS_ID=$((SEAT_CT_ID + 4))
+  SEAT_WS_NAME="workspace$SEAT"
+  SEAT_WS_ADDR="10.88.$n.3"
+  SEAT_TEMPLATE_ID=$((SEAT_CT_ID + 9))
+  SEAT_TEMPLATE_NAME="seat$SEAT-template"
+  SEAT_PVE_USER="student$SEAT@$HOST_PVE_REALM"
   SEAT_VM_IDS=()
   SEAT_VM_NAMES=()
   SEAT_MACHINE_IDS=()
@@ -46,14 +57,12 @@ seat_use() {
   SEAT_OMNI_HOST="$(host_name "omni$SEAT")"
   SEAT_KUBE_HOST="$(host_name "kube$SEAT")"
   SEAT_SITE_HOST="$(host_name "team$SEAT")"
+  SEAT_SHELL_HOST="$(host_name "shell$SEAT")"
   SEAT_SITE_TUNNEL="talos-student-$SEAT"
   SEAT_ISO="$SEAT_NAME-talos.iso"
   SEAT_CLUSTER="$SEAT_NAME"
 }
 
-seat_vm_mac() {
-  printf '%s:%02X' "${SEAT_VM_MACS[$1]}" "$SEAT_INDEX"
-}
 
 seat_omni_forward_close() {
   if [[ -n "$SEAT_OMNI_FORWARD_SEAT" ]]; then
@@ -184,27 +193,42 @@ WantedBy=multi-user.target
 EOF
 }
 
-seat_ensure_container() {
-  local state restarted stage="/root/talos-lab-$SEAT_NAME"
-  state="$(pve_ct_state "$SEAT_CT_ID" "$SEAT_CT_NAME")" || exit 1
+seat_ensure_ct() {
+  local id="$1" name="$2" addr="$3" memory="$4" swap="$5" cores="$6" disk="$7" tun="$8" state
+  state="$(pve_ct_state "$id" "$name")" || exit 1
   if [[ "$state" == absent ]]; then
-    pve_remote CT="$SEAT_CT_ID" NAME="$SEAT_CT_NAME" TEMPLATE="$(host_ct_template)" STORAGE="$PVE_DISK_STORAGE" \
-      MEMORY="$SEAT_CT_MEMORY_MIB" SWAP="$SEAT_CT_SWAP_MIB" CORES="$SEAT_CT_CORES" DISK="$SEAT_CT_DISK_GIB" \
-      VNET="$SEAT_VNET" ADDR="$SEAT_OMNI_ADDR" GATEWAY="$SEAT_GATEWAY" DNS="$(<"$HOST_STATE/host-dns")" BIN="$HOST_REMOTE_BIN" <<'EOF'
+    pve_remote CT="$id" NAME="$name" TEMPLATE="$(host_ct_template)" STORAGE="$PVE_DISK_STORAGE" \
+      MEMORY="$memory" SWAP="$swap" CORES="$cores" DISK="$disk" TUN="$tun" \
+      VNET="$SEAT_VNET" ADDR="$addr" GATEWAY="$SEAT_GATEWAY" DNS="$(<"$HOST_STATE/host-dns")" BIN="$HOST_REMOTE_BIN" <<'EOF'
 set -euo pipefail
+extra=()
+if [[ "$TUN" == yes ]]; then
+  extra+=(--dev0 /dev/net/tun)
+fi
 pct create "$CT" "local:vztmpl/$TEMPLATE" \
   --hostname "$NAME" --memory "$MEMORY" --swap "$SWAP" --cores "$CORES" \
   --rootfs "$STORAGE:$DISK" \
   --net0 "name=eth0,bridge=$VNET,ip=$ADDR/24,gw=$GATEWAY" \
   --nameserver "$DNS" --unprivileged 1 --features nesting=1 \
-  --dev0 /dev/net/tun \
+  "${extra[@]}" \
   --mp0 "$BIN,mp=/opt/talos-lab,ro=1" \
   --onboot 1 --start 1 >/dev/null
+for attempt in $(seq 1 60); do
+  pct exec "$CT" -- true 2>/dev/null && exit 0
+  sleep 1
+done
+echo "container $CT did not accept commands within 60s" >&2
+exit 1
 EOF
-    log "container $SEAT_CT_NAME ($SEAT_CT_ID) created on $SEAT_VNET at $SEAT_OMNI_ADDR"
+    log "container $name ($id) created on $SEAT_VNET at $addr"
   elif [[ "$state" != running ]]; then
-    pve_ssh "pct start $SEAT_CT_ID"
+    pve_ssh "pct start $id"
   fi
+}
+
+seat_ensure_container() {
+  local restarted stage="/root/talos-lab-$SEAT_NAME"
+  seat_ensure_ct "$SEAT_CT_ID" "$SEAT_CT_NAME" "$SEAT_OMNI_ADDR" "$SEAT_CT_MEMORY_MIB" "$SEAT_CT_SWAP_MIB" "$SEAT_CT_CORES" "$SEAT_CT_DISK_GIB" yes
   pve_ssh "rm -rf $stage && mkdir -p $stage && chmod 700 $stage"
   seat_render_omni_config | pve_ssh "cat >$stage/omni.yaml"
   pve_scp "$SEAT_STATE/omni.asc" "$PVE_SSH:$stage/omni.asc"
@@ -302,20 +326,210 @@ seat_ensure_iso() {
   log "install image uploaded as $SEAT_ISO"
 }
 
-seat_ensure_proxmox_user() {
-  pve_remote USER_ID="$SEAT_USER@pve" POOL="$SEAT_NAME" PASSWORD="$(host_user_password "$SEAT_USER")" \
-    ISO_STORAGE="$PVE_ISO_STORAGE" DISK_STORAGE="$PVE_DISK_STORAGE" ZONE="$HOST_SDN_ZONE" VNET="$SEAT_VNET" <<'EOF'
+seat_ensure_pool() {
+  pve_remote POOL="$SEAT_NAME" <<'EOF'
 set -euo pipefail
 pveum pool list --output-format json | grep -q "\"poolid\":\"$POOL\"" || pveum pool add "$POOL"
+EOF
+}
+
+seat_ensure_proxmox_user() {
+  pve_remote USER_ID="$SEAT_PVE_USER" POOL="$SEAT_NAME" \
+    ISO_STORAGE="$PVE_ISO_STORAGE" DISK_STORAGE="$PVE_DISK_STORAGE" ZONE="$HOST_SDN_ZONE" VNET="$SEAT_VNET" <<'EOF'
+set -euo pipefail
 if ! pveum user list --output-format json | grep -q "\"userid\":\"$USER_ID\""; then
-  pveum user add "$USER_ID" --password "$PASSWORD"
+  pveum user add "$USER_ID"
 fi
 pveum acl modify "/pool/$POOL" --users "$USER_ID" --roles PVEVMAdmin
 pveum acl modify "/storage/$ISO_STORAGE" --users "$USER_ID" --roles PVEDatastoreUser
 pveum acl modify "/storage/$DISK_STORAGE" --users "$USER_ID" --roles PVEDatastoreUser
 pveum acl modify "/sdn/zones/$ZONE/$VNET" --users "$USER_ID" --roles PVESDNUser
 EOF
-  log "Proxmox user $SEAT_USER@pve limited to pool $SEAT_NAME and vnet $SEAT_VNET"
+  log "Proxmox user $SEAT_PVE_USER limited to pool $SEAT_NAME and vnet $SEAT_VNET"
+}
+
+seat_ensure_template() {
+  local state response
+  state="$(pve_vm_state "$SEAT_TEMPLATE_ID" "$SEAT_TEMPLATE_NAME")" || exit 1
+  [[ "$state" == absent ]] || return 0
+  response="$(pve_api POST "/nodes/$PVE_NODE/qemu" \
+    --data-urlencode "vmid=$SEAT_TEMPLATE_ID" \
+    --data-urlencode "name=$SEAT_TEMPLATE_NAME" \
+    --data-urlencode "pool=$SEAT_NAME" \
+    --data-urlencode "ostype=l26" \
+    --data-urlencode "machine=q35" \
+    --data-urlencode "bios=ovmf" \
+    --data-urlencode "efidisk0=$PVE_DISK_STORAGE:1,efitype=4m,pre-enrolled-keys=0" \
+    --data-urlencode "cpu=host" \
+    --data-urlencode "sockets=1" \
+    --data-urlencode "cores=$SEAT_VM_CORES" \
+    --data-urlencode "memory=$SEAT_VM_MEMORY_MIB" \
+    --data-urlencode "balloon=0" \
+    --data-urlencode "scsihw=virtio-scsi-pci" \
+    --data-urlencode "scsi0=$PVE_DISK_STORAGE:$SEAT_VM_DISK_GIB,discard=on,cache=writethrough" \
+    --data-urlencode "ide2=$PVE_ISO_STORAGE:iso/$SEAT_ISO,media=cdrom" \
+    --data-urlencode "net0=virtio,bridge=$SEAT_VNET" \
+    --data-urlencode "boot=order=scsi0;ide2" \
+    --data-urlencode "agent=enabled=1" \
+    --data-urlencode "onboot=0")" || exit 1
+  pve_wait_response "$response" 300 || exit 1
+  response="$(pve_api POST "/nodes/$PVE_NODE/qemu/$SEAT_TEMPLATE_ID/template")" || exit 1
+  pve_wait_response "$response" 300 || exit 1
+  log "template $SEAT_TEMPLATE_NAME ($SEAT_TEMPLATE_ID) in pool $SEAT_NAME, booting $SEAT_ISO on $SEAT_VNET"
+}
+
+seat_workspace_service_account() {
+  local key="$SEAT_STATE/workspace-service-account.key" accounts output
+  [[ -s "$key" ]] && return 0
+  accounts="$(seat_omnictl serviceaccount list 2>&1)" || seat_capture_failure "could not list service accounts in the $SEAT_NAME Omni: $accounts"
+  if grep -qw workspace <<<"$accounts"; then
+    seat_omnictl serviceaccount destroy workspace >/dev/null || exit 1
+  fi
+  output="$(seat_omnictl serviceaccount create workspace --use-user-role=false --role Operator 2>&1)" ||
+    seat_capture_failure "could not create the workspace service account in the $SEAT_NAME Omni"
+  local LAB_SCRUB
+  LAB_SCRUB="$(sed -n 's/^OMNI_SERVICE_ACCOUNT_KEY=//p' <<<"$output" | head -1)"
+  [[ -n "$LAB_SCRUB" ]] || die "omnictl did not print a service account key for the $SEAT_NAME workspace"
+  printf '%s' "$LAB_SCRUB" >"$key"
+  chmod 600 "$key"
+}
+
+seat_render_workspace_unit() {
+  cat <<EOF
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$SEAT_WS_USER
+WorkingDirectory=/home/$SEAT_WS_USER
+EnvironmentFile=/etc/talos-lab/code-server.env
+ExecStart=/opt/talos-lab/code-server/bin/code-server --bind-addr $SEAT_WS_ADDR:$SEAT_WS_PORT --auth password --disable-telemetry --disable-update-check --disable-workspace-trust /home/$SEAT_WS_USER
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+seat_render_connect() {
+  cat <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cluster="${1:-}"
+if [[ -z "$cluster" ]]; then
+  clusters="$(omnictl get clusters | awk 'NR > 1 {print $3}')"
+  case "$(grep -c . <<<"$clusters" || true)" in
+    0)
+      echo "There is no cluster yet. Create one in Omni, then run connect again." >&2
+      exit 1
+      ;;
+    1) cluster="$clusters" ;;
+    *)
+      echo "There are several clusters: $(paste -sd' ' <<<"$clusters"). Run connect with the one you want, for example: connect $(head -1 <<<"$clusters")" >&2
+      exit 1
+      ;;
+  esac
+fi
+mkdir -p "$HOME/.kube"
+omnictl kubeconfig "$HOME/.kube/config" --cluster "$cluster" --service-account --user "$USER" --ttl 24h --force --merge=false >/dev/null
+echo "kubectl now talks to cluster $cluster. Try: kubectl get nodes"
+EOF
+}
+
+seat_render_omnictl_wrapper() {
+  cat <<'EOF'
+#!/bin/sh
+set -a
+. /etc/talos-lab-workspace.env
+set +a
+exec /opt/talos-lab/omnictl/omnictl-linux-amd64 "$@"
+EOF
+}
+
+seat_render_vscode_settings() {
+  jq -n '{
+    "workbench.startupEditor": "readme",
+    "telemetry.telemetryLevel": "off",
+    "security.workspace.trust.enabled": false,
+    "terminal.integrated.defaultProfile.linux": "bash",
+    "terminal.integrated.cwd": "${workspaceFolder}",
+    "files.exclude": {"**/.*": true}
+  }'
+}
+
+seat_ensure_workspace() {
+  local stage="/root/talos-lab-$SEAT_NAME-workspace" restarted
+  seat_ensure_ct "$SEAT_WS_ID" "$SEAT_WS_NAME" "$SEAT_WS_ADDR" "$SEAT_WS_MEMORY_MIB" "$SEAT_WS_SWAP_MIB" "$SEAT_WS_CORES" "$SEAT_WS_DISK_GIB" no
+  seat_workspace_service_account
+  pve_ssh "rm -rf $stage && mkdir -p $stage/manifests && chmod 700 $stage"
+  printf 'OMNI_ENDPOINT=http://%s:8080\nOMNI_SERVICE_ACCOUNT_KEY=%s\n' "$SEAT_OMNI_ADDR" "$(<"$SEAT_STATE/workspace-service-account.key")" | pve_ssh "cat >$stage/workspace.env"
+  printf 'PASSWORD=%s\n' "$(host_user_password "$SEAT_USER")" | pve_ssh "cat >$stage/code-server.env"
+  seat_render_workspace_unit | pve_ssh "cat >$stage/talos-lab-workspace.service"
+  seat_render_connect | pve_ssh "cat >$stage/connect"
+  seat_render_omnictl_wrapper | pve_ssh "cat >$stage/omnictl"
+  seat_render_vscode_settings | pve_ssh "cat >$stage/settings.json"
+  pve_scp "$LAB_ROOT/manifests/hello.yaml" "$LAB_ROOT/manifests/cloudflared.yaml" "$PVE_SSH:$stage/manifests/"
+  pve_scp "$LAB_ROOT/docs/hands-on.md" "$PVE_SSH:$stage/README.md"
+  pve_scp "$SEAT_STATE/site-token" "$PVE_SSH:$stage/token.txt"
+  restarted="$(pve_remote CT="$SEAT_WS_ID" STAGE="$stage" WS_USER="$SEAT_WS_USER" <<'EOF'
+set -euo pipefail
+trap 'rm -rf "$STAGE"' EXIT
+home="/home/$WS_USER"
+pct exec "$CT" -- id -u "$WS_USER" >/dev/null 2>&1 || pct exec "$CT" -- useradd --create-home --shell /bin/bash "$WS_USER"
+pct exec "$CT" -- install -d -m 700 /etc/talos-lab
+pct exec "$CT" -- install -d -o "$WS_USER" -g "$WS_USER" -m 755 "$home/manifests" "$home/.local/share/code-server/User"
+pct exec "$CT" -- ln -sfn /opt/talos-lab/kubectl /usr/local/bin/kubectl
+changed=false
+push() {
+  local source="$1" target="$2" perms="$3" owner="$4" current
+  current="$(pct exec "$CT" -- sha256sum "$target" 2>/dev/null | cut -d' ' -f1 || true)"
+  if [[ "$current" != "$(sha256sum "$source" | cut -d' ' -f1)" ]]; then
+    pct push "$CT" "$source" "$target" --perms "$perms" --user "${owner%:*}" --group "${owner#*:}"
+    return 0
+  fi
+  return 1
+}
+push "$STAGE/code-server.env" /etc/talos-lab/code-server.env 600 root:root && changed=true
+push "$STAGE/talos-lab-workspace.service" /etc/systemd/system/talos-lab-workspace.service 644 root:root && changed=true
+gid="$(pct exec "$CT" -- id -g "$WS_USER")"
+push "$STAGE/workspace.env" /etc/talos-lab-workspace.env 640 "0:$gid" || true
+push "$STAGE/connect" /usr/local/bin/connect 755 root:root || true
+push "$STAGE/omnictl" /usr/local/bin/omnictl 755 root:root || true
+uid="$(pct exec "$CT" -- id -u "$WS_USER")"
+push "$STAGE/settings.json" "$home/.local/share/code-server/User/settings.json" 644 "$uid:$gid" || true
+push "$STAGE/README.md" "$home/README.md" 644 "$uid:$gid" || true
+push "$STAGE/token.txt" "$home/token.txt" 600 "$uid:$gid" || true
+for manifest in "$STAGE"/manifests/*.yaml; do
+  push "$manifest" "$home/manifests/$(basename "$manifest")" 644 "$uid:$gid" || true
+done
+pct exec "$CT" -- systemctl daemon-reload
+pct exec "$CT" -- systemctl enable --quiet talos-lab-workspace
+if [[ "$changed" == true ]] || ! pct exec "$CT" -- systemctl is-active --quiet talos-lab-workspace; then
+  pct exec "$CT" -- systemctl restart talos-lab-workspace
+  echo restarted
+fi
+EOF
+)" || exit 1
+  if [[ "$restarted" == restarted ]]; then
+    log "workspace for $SEAT_NAME started at $SEAT_WS_ADDR:$SEAT_WS_PORT"
+  fi
+}
+
+seat_wait_workspace() {
+  local deadline=$((SECONDS + SEAT_OMNI_READY_TIMEOUT))
+  until pve_ssh "curl --silent --fail --max-time 5 --output /dev/null http://$SEAT_WS_ADDR:$SEAT_WS_PORT/healthz"; do
+    ((SECONDS < deadline)) || seat_capture_failure "the $SEAT_NAME workspace did not answer at $SEAT_WS_ADDR:$SEAT_WS_PORT within ${SEAT_OMNI_READY_TIMEOUT}s"
+    sleep 3
+  done
+  seat_workspace_run 'omnictl get clusters >/dev/null && kubectl version --client >/dev/null' >/dev/null ||
+    seat_capture_failure "the $SEAT_NAME workspace cannot reach its Omni or run kubectl"
+  log "workspace for $SEAT_NAME answering, omnictl and kubectl work inside it"
+}
+
+seat_workspace_run() {
+  pve_ssh "pct exec $SEAT_WS_ID -- su - $SEAT_WS_USER -c $(printf '%q' "$1")"
 }
 
 seat_ensure_site_tunnel() {
@@ -334,16 +548,13 @@ seat_ensure_site_tunnel() {
 
 seat_write_sheet() {
   {
-    printf 'seat      %s\n' "$SEAT"
-    printf 'email     %s\n' "$SEAT_EMAIL"
-    printf 'password  %s\n' "$(host_user_password "$SEAT_USER")"
-    printf 'omni      https://%s\n' "$SEAT_OMNI_HOST"
-    printf 'proxmox   https://%s (user %s, realm Proxmox VE authentication server)\n' "$(host_name pve)" "$SEAT_USER"
-    printf 'pool      %s\n' "$SEAT_NAME"
-    printf 'network   %s\n' "$SEAT_VNET"
-    printf 'image     %s\n' "$SEAT_ISO"
-    printf 'site      https://%s\n' "$SEAT_SITE_HOST"
-    printf 'token     %s/site-token\n' "$SEAT_STATE"
+    printf 'Seat       %s\n' "$SEAT"
+    printf 'Email      %s\n' "$SEAT_EMAIL"
+    printf 'Password   %s\n' "$(host_user_password "$SEAT_USER")"
+    printf 'Workspace  https://%s\n' "$SEAT_SHELL_HOST"
+    printf 'Omni       https://%s\n' "$SEAT_OMNI_HOST"
+    printf 'Proxmox    https://%s\n' "$(host_name pve)"
+    printf 'Site       https://%s\n' "$SEAT_SITE_HOST"
   } >"$SEAT_STATE/sheet.txt"
 }
 
@@ -354,8 +565,12 @@ seat_create() {
   seat_ensure_container
   seat_wait_omni
   seat_ensure_iso
+  seat_ensure_pool
+  seat_ensure_template
   seat_ensure_proxmox_user
   seat_ensure_site_tunnel
+  seat_ensure_workspace
+  seat_wait_workspace
   seat_write_sheet
   log "$SEAT_NAME ready, sign-in sheet at $SEAT_STATE/sheet.txt"
 }
@@ -395,20 +610,48 @@ seat_remote_numbers() {
   } | sort -u
 }
 
+seat_pool_vms() {
+  local pools
+  pools="$(pve_api GET /pools)" || return 1
+  if ! jq -e --arg pool "$SEAT_NAME" '.data | any(.poolid == $pool)' <<<"$pools" >/dev/null; then
+    return 0
+  fi
+  pve_api GET "/pools?poolid=$SEAT_NAME" |
+    jq -r '.data[0].members // [] | map(select(.type == "qemu")) | sort_by(.template // 0) | .[] | "\(.vmid)\t\(.name)"'
+}
+
+seat_delete_pool_vms() {
+  local vms vmid name
+  vms="$(seat_pool_vms)" || exit 1
+  while IFS=$'\t' read -r vmid name; do
+    [[ -n "$vmid" ]] || continue
+    pve_delete_vm "$vmid" "$name" || exit 1
+    log "VM $name ($vmid) in pool $SEAT_NAME removed"
+  done <<<"$vms"
+}
+
+seat_destroy_ct() {
+  local id="$1" name="$2" state
+  state="$(pve_ct_state "$id" "$name")" || exit 1
+  if [[ "$state" != absent ]]; then
+    pve_ssh "pct stop $id >/dev/null 2>&1 || true; pct destroy $id --purge 1 >/dev/null"
+    log "container $name removed"
+  fi
+}
+
 seat_delete() {
-  local index state
+  local index
   seat_use "$1"
   seat_omni_forward_close
+  seat_delete_pool_vms
   for index in "${!SEAT_VM_IDS[@]}"; do
     pve_delete_vm "${SEAT_VM_IDS[index]}" "${SEAT_VM_NAMES[index]}" || exit 1
   done
-  state="$(pve_ct_state "$SEAT_CT_ID" "$SEAT_CT_NAME")" || exit 1
-  if [[ "$state" != absent ]]; then
-    pve_ssh "pct stop $SEAT_CT_ID >/dev/null 2>&1 || true; pct destroy $SEAT_CT_ID --purge 1 >/dev/null"
-    log "container $SEAT_CT_NAME removed"
-  fi
+  pve_delete_vm "$SEAT_TEMPLATE_ID" "$SEAT_TEMPLATE_NAME" || exit 1
+  seat_destroy_ct "$SEAT_WS_ID" "$SEAT_WS_NAME"
+  seat_destroy_ct "$SEAT_CT_ID" "$SEAT_CT_NAME"
   pve_delete_iso "$SEAT_ISO" || exit 1
-  pve_remote ZONE="$HOST_SDN_ZONE" VNET="$SEAT_VNET" SUBNET="$SEAT_SUBNET" USER_ID="$SEAT_USER@pve" POOL="$SEAT_NAME" <<'EOF'
+  pve_remote ZONE="$HOST_SDN_ZONE" VNET="$SEAT_VNET" SUBNET="$SEAT_SUBNET" USER_ID="$SEAT_PVE_USER" POOL="$SEAT_NAME" <<'EOF'
 set -euo pipefail
 subnet_id="$ZONE-${SUBNET/\//-}"
 pveum user list --output-format json | grep -q "\"userid\":\"$USER_ID\"" && pveum user delete "$USER_ID"

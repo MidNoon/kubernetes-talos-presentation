@@ -27,7 +27,7 @@ rehearsal_capture_failure() {
   seat_omnictl get links -o json >"$dir/links.json" 2>&1 || true
   seat_omnictl get machinestatus -o json >"$dir/machinestatus.json" 2>&1 || true
   seat_omnictl get clusterstatus "$SEAT_CLUSTER" -o json >"$dir/clusterstatus.json" 2>&1 || true
-  pve_ssh "cat /var/lib/misc/dnsmasq.$HOST_SDN_ZONE.leases 2>/dev/null; ls /var/lib/misc/" >"$dir/dhcp.txt" 2>&1 || true
+  pve_ssh "pct exec $SEAT_WS_ID -- journalctl --no-pager --lines=80 -u talos-lab-workspace" >"$dir/workspace.txt" 2>&1 || true
   if [[ -s "$(lab_kubeconfig)" ]]; then
     lab_kubectl get nodes -o wide >"$dir/nodes.txt" 2>&1 || true
     lab_kubectl get pods -A -o wide >"$dir/pods.txt" 2>&1 || true
@@ -52,41 +52,28 @@ rehearsal_wait_link() {
   fail "link for $id stayed at connected=${state:-absent}, wanted connected=$wanted after ${REHEARSAL_LINK_TIMEOUT}s"
 }
 
-rehearsal_create_vm() {
+rehearsal_clone_vm() {
   local index="$1" response
-  response="$(pve_api POST "/nodes/$PVE_NODE/qemu" \
-    --data-urlencode "vmid=${SEAT_VM_IDS[index]}" \
+  response="$(pve_api POST "/nodes/$PVE_NODE/qemu/$SEAT_TEMPLATE_ID/clone" \
+    --data-urlencode "newid=${SEAT_VM_IDS[index]}" \
     --data-urlencode "name=${SEAT_VM_NAMES[index]}" \
-    --data-urlencode "pool=$SEAT_NAME" \
-    --data-urlencode "ostype=l26" \
-    --data-urlencode "machine=q35" \
-    --data-urlencode "bios=ovmf" \
-    --data-urlencode "efidisk0=$PVE_DISK_STORAGE:1,efitype=4m,pre-enrolled-keys=0" \
-    --data-urlencode "cpu=host" \
-    --data-urlencode "sockets=1" \
-    --data-urlencode "cores=${SEAT_VM_CORES[index]}" \
-    --data-urlencode "memory=${SEAT_VM_MEMORY_MIB[index]}" \
-    --data-urlencode "balloon=0" \
-    --data-urlencode "scsihw=virtio-scsi-pci" \
-    --data-urlencode "scsi0=$PVE_DISK_STORAGE:$SEAT_VM_DISK_GIB,discard=on,cache=writethrough" \
-    --data-urlencode "ide2=$PVE_ISO_STORAGE:iso/$SEAT_ISO,media=cdrom" \
-    --data-urlencode "net0=virtio=$(seat_vm_mac "$index"),bridge=$SEAT_VNET" \
-    --data-urlencode "boot=order=scsi0;ide2" \
-    --data-urlencode "agent=enabled=1" \
-    --data-urlencode "smbios1=uuid=${SEAT_MACHINE_IDS[index]}" \
-    --data-urlencode "onboot=0")" || return 1
-  pve_wait_response "$response" 300
+    --data-urlencode "pool=$SEAT_NAME")" || return 1
+  pve_wait_response "$response" 300 || return 1
+  response="$(pve_api PUT "/nodes/$PVE_NODE/qemu/${SEAT_VM_IDS[index]}/config" \
+    --data-urlencode "smbios1=uuid=${SEAT_MACHINE_IDS[index]}")" || return 1
+  pve_wait_response "$response" 60
 }
 
 rehearsal_machines() {
   local index state
+  [[ "$(pve_vm_state "$SEAT_TEMPLATE_ID" "$SEAT_TEMPLATE_NAME")" == stopped ]] || die "$SEAT_TEMPLATE_NAME is missing, run ./lab seats create first"
   for index in "${!SEAT_VM_IDS[@]}"; do
     state="$(pve_vm_state "${SEAT_VM_IDS[index]}" "${SEAT_VM_NAMES[index]}")" || exit 1
     [[ "$state" == absent ]] || die "${SEAT_VM_NAMES[index]} already exists and is $state, run ./lab seat $SEAT reset first"
   done
   for index in "${!SEAT_VM_IDS[@]}"; do
-    rehearsal_create_vm "$index" || exit 1
-    log "created ${SEAT_VM_NAMES[index]} as VM ${SEAT_VM_IDS[index]} in pool $SEAT_NAME on $SEAT_VNET"
+    rehearsal_clone_vm "$index" || exit 1
+    log "cloned $SEAT_TEMPLATE_NAME into ${SEAT_VM_NAMES[index]} (${SEAT_VM_IDS[index]}) in pool $SEAT_NAME"
   done
   for index in "${!SEAT_VM_IDS[@]}"; do
     pve_start_vm "${SEAT_VM_IDS[index]}" "${SEAT_VM_NAMES[index]}" || exit 1
@@ -161,6 +148,28 @@ rehearsal_cluster() {
   log "cluster $SEAT_CLUSTER ready, kubectl reaches it through https://$SEAT_KUBE_HOST"
 }
 
+rehearsal_student() {
+  local step="$1" command="$2" output
+  output="$(seat_workspace_run "$command" 2>&1)" || rehearsal_capture_failure "the workspace step \"$step\" failed: $output"
+  log "workspace: $step"
+}
+
+rehearsal_student_site() {
+  local attempt nodes=0
+  rehearsal_student "connect and list nodes" 'connect && kubectl get nodes'
+  for ((attempt = 1; attempt <= 4; attempt++)); do
+    rehearsal_student "restart CoreDNS" 'kubectl -n kube-system rollout restart deployment/coredns && kubectl -n kube-system rollout status deployment/coredns'
+    nodes="$(site_distinct_nodes kube-system k8s-app=kube-dns)" || rehearsal_capture_failure "could not read CoreDNS placement"
+    ((nodes >= 2)) && break
+  done
+  ((nodes >= 2)) || rehearsal_capture_failure "CoreDNS stayed on $nodes node after $attempt restarts"
+  log "CoreDNS spread across $nodes nodes"
+  rehearsal_student "deploy the site" 'kubectl apply -f manifests/hello.yaml && kubectl rollout status deployment/hello'
+  site_verify
+  rehearsal_student "publish the site" 'kubectl create secret generic cloudflared-token --from-literal=token="$(cat token.txt)" && kubectl apply -f manifests/cloudflared.yaml && kubectl rollout status deployment/cloudflared'
+  rehearsal_tunnel_verify
+}
+
 rehearsal_tunnel_verify() {
   local url="https://$SEAT_SITE_HOST/whoami" deadline=$((SECONDS + TUNNEL_PUBLIC_TIMEOUT)) body attempt pod seen="" nodes
   nodes="$(site_distinct_nodes default app=cloudflared)" || rehearsal_capture_failure "could not read cloudflared placement"
@@ -178,65 +187,52 @@ rehearsal_tunnel_verify() {
   log "site published: both connectors on 2 nodes and both replicas answering at https://$SEAT_SITE_HOST"
 }
 
-rehearsal_tunnel() {
-  [[ -s "$SEAT_STATE/site-token" ]] || die "$SEAT_NAME has no site tunnel token, run ./lab seats create first"
-  lab_kubectl create secret generic cloudflared-token --from-file=token="$SEAT_STATE/site-token" \
-    --dry-run=client -o yaml | lab_kubectl apply -f - >/dev/null
-  lab_kubectl apply -f "$LAB_ROOT/manifests/cloudflared.yaml" >/dev/null
-  lab_kubectl rollout status deployment/cloudflared --timeout="$SITE_ROLLOUT_TIMEOUT" >/dev/null ||
-    rehearsal_capture_failure "cloudflared did not finish rolling out"
-  rehearsal_tunnel_verify
-}
-
 seat_up() {
   rehearsal_load "$1"
   rehearsal_machines
   rehearsal_cluster
-  site_up
-  rehearsal_tunnel
+  rehearsal_student_site
   log "$SEAT_NAME rehearsal up: https://$SEAT_SITE_HOST"
 }
 
-rehearsal_cluster_exists() {
+rehearsal_cluster_names() {
   local raw
-  raw="$(seat_omnictl get clusters -o json)" || return 2
-  jq -s -e --arg name "$SEAT_CLUSTER" 'any(.[]; .metadata.id == $name)' <<<"$raw" >/dev/null
+  raw="$(seat_omnictl get clusters -o json)" || return 1
+  jq -s -r '.[].metadata.id' <<<"$raw"
 }
 
 seat_reset() {
-  local index status=0 raw id deadline
+  local clusters cluster deadline raw ids id vms vmid name template
   rehearsal_load "$1"
-  rehearsal_cluster_exists || status=$?
-  case "$status" in
-    0)
-      log "deleting cluster $SEAT_CLUSTER while its machines are online"
-      LAB_OMNI_TIMEOUT="$REHEARSAL_DELETE_TIMEOUT" seat_omnictl cluster delete "$SEAT_CLUSTER" >/dev/null ||
-        rehearsal_capture_failure "cluster $SEAT_CLUSTER could not be deleted"
-      deadline=$((SECONDS + REHEARSAL_DELETE_TIMEOUT))
-      while rehearsal_cluster_exists; do
-        ((SECONDS < deadline)) || rehearsal_capture_failure "cluster $SEAT_CLUSTER still exists after ${REHEARSAL_DELETE_TIMEOUT}s"
-        sleep 5
-      done
-      ;;
-    1) ;;
-    *) exit 1 ;;
-  esac
-  for index in "${!SEAT_VM_IDS[@]}"; do
-    pve_delete_vm "${SEAT_VM_IDS[index]}" "${SEAT_VM_NAMES[index]}" || exit 1
+  clusters="$(rehearsal_cluster_names)" || exit 1
+  for cluster in $clusters; do
+    log "deleting cluster $cluster while its machines are online"
+    LAB_OMNI_TIMEOUT="$REHEARSAL_DELETE_TIMEOUT" seat_omnictl cluster delete "$cluster" >/dev/null ||
+      rehearsal_capture_failure "cluster $cluster could not be deleted"
   done
+  deadline=$((SECONDS + REHEARSAL_DELETE_TIMEOUT))
+  while [[ -n "$(rehearsal_cluster_names)" ]]; do
+    ((SECONDS < deadline)) || rehearsal_capture_failure "clusters still exist after ${REHEARSAL_DELETE_TIMEOUT}s: $(rehearsal_cluster_names | paste -sd' ')"
+    sleep 5
+  done
+  vms="$(seat_pool_vms)" || exit 1
+  while IFS=$'\t' read -r vmid name; do
+    [[ -n "$vmid" && "$vmid" != "$SEAT_TEMPLATE_ID" ]] || continue
+    pve_delete_vm "$vmid" "$name" || exit 1
+    log "VM $name ($vmid) removed"
+  done <<<"$vms"
   raw="$(seat_omnictl get links -o json)" || exit 1
-  for id in "${SEAT_MACHINE_IDS[@]}"; do
-    if jq -s -e --arg id "$id" 'any(.[]; .metadata.id == $id)' <<<"$raw" >/dev/null; then
-      seat_omnictl delete link "$id" >/dev/null || exit 1
-    fi
+  ids="$(jq -s -r '.[].metadata.id' <<<"$raw")"
+  for id in $ids; do
+    seat_omnictl delete link "$id" >/dev/null 2>&1 || exit 1
   done
   rm -rf "$(lab_kubeconfig)" "$SEAT_STATE/cluster.yaml"
+  pve_ssh "pct exec $SEAT_WS_ID -- rm -rf /home/$SEAT_WS_USER/.kube" || exit 1
+  [[ -z "$(rehearsal_cluster_names)" ]] || die "clusters remain after reset"
   raw="$(seat_omnictl get links -o json)" || exit 1
-  for id in "${SEAT_MACHINE_IDS[@]}"; do
-    ! jq -s -e --arg id "$id" 'any(.[]; .metadata.id == $id)' <<<"$raw" >/dev/null || die "link $id still exists after reset"
-  done
-  for index in "${!SEAT_VM_IDS[@]}"; do
-    [[ "$(pve_vm_state "${SEAT_VM_IDS[index]}" "${SEAT_VM_NAMES[index]}")" == absent ]] || die "${SEAT_VM_NAMES[index]} still exists after reset"
-  done
-  log "$SEAT_NAME reset: cluster, machines and VMs removed, the seat's Omni, logins and tunnel kept"
+  [[ "$(jq -s 'length' <<<"$raw")" == 0 ]] || die "machines remain in the $SEAT_NAME Omni after reset"
+  template="$(pve_vm_state "$SEAT_TEMPLATE_ID" "$SEAT_TEMPLATE_NAME")" || exit 1
+  [[ "$template" == stopped ]] || die "$SEAT_TEMPLATE_NAME is $template after reset"
+  [[ "$(seat_pool_vms | grep -c . || true)" == 1 ]] || die "pool $SEAT_NAME still holds VMs besides the template: $(seat_pool_vms | cut -f2 | paste -sd' ')"
+  log "$SEAT_NAME reset: clusters, machines and VMs removed, the template, Omni, workspace, logins and tunnel kept"
 }

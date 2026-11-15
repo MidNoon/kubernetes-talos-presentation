@@ -117,7 +117,7 @@ test_cf_allowlist_refuses_other_tunnel_names_even_when_current() {
 }
 test_cf_allowlist_permits_every_lab_hostname() {
   local host
-  for host in team07 omni07 kube07 auth pve; do
+  for host in team07 omni07 kube07 shell07 auth pve; do
     LAB_TUNNEL_HOSTNAME="$host.zone.example"
     cf_allowed dns records create -z zone.example --body "{\"name\":\"$host.zone.example\",\"type\":\"CNAME\"}" || return 1
   done
@@ -217,7 +217,8 @@ test_seat_use_derives_isolated_identities() {
   [[ "${SEAT_VM_IDS[*]}" == "9071 9072 9073" && "${SEAT_VM_NAMES[*]}" == "seat07-cp seat07-worker-a seat07-worker-b" ]] || return 1
   [[ "${SEAT_MACHINE_IDS[0]}" == 1ab51de0-7a10-4000-8000-000000007001 ]] || return 1
   [[ "$SEAT_OMNI_HOST" == omni07.zone.example && "$SEAT_KUBE_HOST" == kube07.zone.example && "$SEAT_SITE_HOST" == team07.zone.example ]] || return 1
-  [[ "$(seat_vm_mac 2)" == BC:24:11:1A:B7:07 ]]
+  [[ "$SEAT_WS_ID" == 9074 && "$SEAT_WS_NAME" == workspace07 && "$SEAT_WS_ADDR" == 10.88.7.3 ]] || return 1
+  [[ "$SEAT_TEMPLATE_ID" == 9079 && "$SEAT_TEMPLATE_NAME" == seat07-template && "$SEAT_PVE_USER" == student07@lab && "$SEAT_SHELL_HOST" == shell07.zone.example ]]
 }
 test_seat_numbers_with_leading_zeros_are_decimal() {
   seat_use 08
@@ -227,7 +228,7 @@ test_seat_identities_never_overlap() {
   local n all=()
   for n in $(seq 1 "$SEAT_MAX"); do
     seat_use "$n"
-    all+=("$SEAT_CT_ID" "${SEAT_VM_IDS[@]}" "${SEAT_MACHINE_IDS[@]}" "$SEAT_SUBNET" "$(seat_vm_mac 0)" "$(seat_vm_mac 1)" "$(seat_vm_mac 2)")
+    all+=("$SEAT_CT_ID" "$SEAT_WS_ID" "$SEAT_TEMPLATE_ID" "${SEAT_VM_IDS[@]}" "${SEAT_MACHINE_IDS[@]}" "$SEAT_SUBNET" "$SEAT_WS_ADDR")
   done
   [[ "$(printf '%s\n' "${all[@]}" | sort | uniq -d)" == "" ]]
 }
@@ -266,17 +267,20 @@ test_host_ingress_routes_each_seat_and_ends_with_a_catch_all() {
   [[ "$(jq -r '.[] | select(.hostname == "omni03.zone.example") | .service' <<<"$ingress")" == http://10.88.3.2:8080 ]] || return 1
   [[ "$(jq -r '.[] | select(.hostname == "kube01.zone.example") | .service' <<<"$ingress")" == http://10.88.1.2:8095 ]] || return 1
   [[ "$(jq -r '.[] | select(.hostname == "pve.zone.example") | .originRequest.noTLSVerify' <<<"$ingress")" == true ]] || return 1
-  [[ "$(jq 'length' <<<"$ingress")" == 7 ]]
+  [[ "$(jq -r '.[] | select(.hostname == "shell03.zone.example") | .service' <<<"$ingress")" == http://10.88.3.3:8443 ]] || return 1
+  [[ "$(jq 'length' <<<"$ingress")" == 9 ]]
 }
 test_dex_config_carries_hashes_not_passwords() {
   local config
   mkdir -p "$LAB_SEATS_STATE/seat02"
   printf 'secret\n' >"$HOST_STATE/dex-client-secret"
+  printf 'pve-secret\n' >"$HOST_STATE/proxmox-client-secret"
   printf 'student02\tstudent02@zone.example\t%s\t$2b$10$hash\tuuid-2\n' "$SECRET_PASSWORD" >"$HOST_STATE/users.tsv"
   config="$(host_render_dex)" || return 1
   ! grep -qF "$SECRET_PASSWORD" <<<"$config" || return 1
   [[ "$(jq -r '.staticPasswords[0].hash' <<<"$config")" == '$2b$10$hash' ]] || return 1
-  [[ "$(jq -r '.staticClients[0].redirectURIs[0]' <<<"$config")" == https://omni02.zone.example/oidc/consume ]]
+  [[ "$(jq -r '.staticClients[0].redirectURIs[0]' <<<"$config")" == https://omni02.zone.example/oidc/consume ]] || return 1
+  [[ "$(jq -r '.staticClients[] | select(.id == "proxmox") | .redirectURIs[0]' <<<"$config")" == https://pve.zone.example ]]
 }
 test_seat_numbers_succeed_with_no_seats() {
   set -o pipefail

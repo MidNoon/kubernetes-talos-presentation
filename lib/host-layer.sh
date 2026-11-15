@@ -5,6 +5,11 @@ readonly HOST_DEX_IMAGE=ghcr.io/dexidp/dex@sha256:65b72ca0f4b0bf6d4ada84ec21da88
 readonly HOST_DEX_SHA256=e73fe3d2c9efc03551c62fcc5694acec8db1f36a79110f30070d2dc84c2951d1
 readonly HOST_CLOUDFLARED_VERSION=2026.11.0
 readonly HOST_CLOUDFLARED_SHA256=51f7c68b57ed7269164075d7e789efce5b59355982f06392deeb037d982a51fd
+readonly HOST_KUBECTL_VERSION=v1.37.2
+readonly HOST_KUBECTL_SHA256=c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4
+readonly HOST_CODE_SERVER_VERSION=4.145.2
+readonly HOST_CODE_SERVER_SHA256=2f6db6c3e8b733dd6b3aeee83532e148b2bae2e392353ba85452d03572348962
+readonly HOST_PVE_REALM=lab
 readonly HOST_DEX_PORT=5556
 readonly HOST_TUNNEL_NAME=talos-lab-host
 readonly HOST_REMOTE_BIN=/usr/local/lib/talos-lab
@@ -60,15 +65,24 @@ host_fetch_binaries() {
     chmod 755 "$dir/dex.part"
     mv "$dir/dex.part" "$dir/dex"
   fi
-  if [[ ! -x "$dir/cloudflared" ]]; then
-    log "downloading cloudflared $HOST_CLOUDFLARED_VERSION"
-    curl --fail --silent --show-error --location --output "$dir/cloudflared.part" \
-      "https://github.com/cloudflare/cloudflared/releases/download/$HOST_CLOUDFLARED_VERSION/cloudflared-linux-amd64"
-    [[ "$(sha256sum "$dir/cloudflared.part" | cut -d' ' -f1)" == "$HOST_CLOUDFLARED_SHA256" ]] ||
-      die "cloudflared-linux-amd64 does not match $HOST_CLOUDFLARED_SHA256"
-    chmod 755 "$dir/cloudflared.part"
-    mv "$dir/cloudflared.part" "$dir/cloudflared"
+  host_fetch_verified cloudflared "$HOST_CLOUDFLARED_SHA256" "$dir/cloudflared" 755 \
+    "https://github.com/cloudflare/cloudflared/releases/download/$HOST_CLOUDFLARED_VERSION/cloudflared-linux-amd64"
+  host_fetch_verified kubectl "$HOST_KUBECTL_SHA256" "$dir/kubectl" 755 \
+    "https://dl.k8s.io/release/$HOST_KUBECTL_VERSION/bin/linux/amd64/kubectl"
+  host_fetch_verified code-server "$HOST_CODE_SERVER_SHA256" "$dir/code-server.tar.gz" 644 \
+    "https://github.com/coder/code-server/releases/download/v$HOST_CODE_SERVER_VERSION/code-server-$HOST_CODE_SERVER_VERSION-linux-amd64.tar.gz"
+}
+
+host_fetch_verified() {
+  local name="$1" sha256="$2" target="$3" mode="$4" url="$5"
+  if [[ -f "$target" && "$(sha256sum "$target" | cut -d' ' -f1)" == "$sha256" ]]; then
+    return 0
   fi
+  log "downloading $name"
+  curl --fail --silent --show-error --location --output "$target.part" "$url"
+  [[ "$(sha256sum "$target.part" | cut -d' ' -f1)" == "$sha256" ]] || die "$name from $url does not match $sha256"
+  chmod "$mode" "$target.part"
+  mv "$target.part" "$target"
 }
 
 host_omnictl_local() {
@@ -113,6 +127,7 @@ host_seat_numbers() {
 
 host_ensure_secrets() {
   [[ -s "$HOST_STATE/dex-client-secret" ]] || openssl rand -hex 32 >"$HOST_STATE/dex-client-secret"
+  [[ -s "$HOST_STATE/proxmox-client-secret" ]] || openssl rand -hex 32 >"$HOST_STATE/proxmox-client-secret"
   host_ensure_user instructor
 }
 
@@ -123,6 +138,8 @@ host_render_dex() {
     --arg issuer "https://$(host_name auth)" \
     --arg listen "127.0.0.1:$HOST_DEX_PORT" \
     --arg secret "$(<"$HOST_STATE/dex-client-secret")" \
+    --arg proxmox_secret "$(<"$HOST_STATE/proxmox-client-secret")" \
+    --arg proxmox "https://$(host_name pve)" \
     --argjson redirects "$redirects" \
     --rawfile users "$HOST_STATE/users.tsv" \
     '{
@@ -130,7 +147,10 @@ host_render_dex() {
       storage: {type: "memory"},
       web: {http: $listen},
       oauth2: {skipApprovalScreen: true, passwordConnector: "local"},
-      staticClients: [{id: "omni", name: "Omni", secret: $secret, redirectURIs: $redirects}],
+      staticClients: [
+        {id: "omni", name: "Omni", secret: $secret, redirectURIs: $redirects},
+        {id: "proxmox", name: "Proxmox", secret: $proxmox_secret, redirectURIs: [$proxmox]}
+      ],
       enablePasswordDB: true,
       staticPasswords: [
         $users | split("\n")[] | select(length > 0) | split("\t")
@@ -219,7 +239,7 @@ host_ct_template() {
 }
 
 host_upload_binaries() {
-  local name local_sum remote_sum platform names=(omni dex cloudflared)
+  local name local_sum remote_sum platform names=(omni dex cloudflared kubectl code-server.tar.gz)
   for platform in "${HOST_OMNICTL_PLATFORMS[@]}"; do
     names+=("omnictl/omnictl-$platform")
   done
@@ -233,6 +253,47 @@ host_upload_binaries() {
       log "uploaded $name"
     fi
   done
+  pve_remote BIN="$HOST_REMOTE_BIN" VERSION="$HOST_CODE_SERVER_VERSION" <<'EOF'
+set -euo pipefail
+if [[ "$(cat "$BIN/code-server/.talos-lab-version" 2>/dev/null)" != "$VERSION" ]]; then
+  rm -rf "$BIN/code-server" "$BIN/code-server.part"
+  mkdir -p "$BIN/code-server.part"
+  tar -xzf "$BIN/code-server.tar.gz" -C "$BIN/code-server.part" --strip-components=1 --no-same-owner
+  printf '%s\n' "$VERSION" >"$BIN/code-server.part/.talos-lab-version"
+  chmod -R a+rX "$BIN/code-server.part"
+  mv "$BIN/code-server.part" "$BIN/code-server"
+fi
+EOF
+}
+
+host_ensure_realm() {
+  pve_remote REALM="$HOST_PVE_REALM" ISSUER="https://$(host_name auth)" SECRET="$(<"$HOST_STATE/proxmox-client-secret")" \
+    INSTRUCTOR="instructor@$HOST_PVE_REALM" <<'EOF'
+set -euo pipefail
+options=(--issuer-url "$ISSUER" --client-id proxmox --client-key "$SECRET" --username-claim username --scopes "openid email profile" --default 1 --comment "Lab login")
+if pveum realm list --output-format json | grep -q "\"realm\":\"$REALM\""; then
+  pveum realm modify "$REALM" "${options[@]}"
+else
+  pveum realm add "$REALM" --type openid --autocreate 0 "${options[@]}"
+fi
+if ! pveum user list --output-format json | grep -q "\"userid\":\"$INSTRUCTOR\""; then
+  pveum user add "$INSTRUCTOR"
+fi
+pveum acl modify / --users "$INSTRUCTOR" --roles PVEAuditor,PVEVMAdmin
+EOF
+  log "Proxmox realm $HOST_PVE_REALM signs in through Dex, instructor@$HOST_PVE_REALM can see and power every VM"
+}
+
+host_verify_realm() {
+  local response url code
+  response="$(curl --silent --show-error --max-time 30 --insecure --pinnedpubkey "sha256//$PVE_TLS_PIN" \
+    --data-urlencode "realm=$HOST_PVE_REALM" --data-urlencode "redirect-url=https://$(host_name pve)" \
+    "$PVE_URL/api2/json/access/openid/auth-url")" || host_capture_failure "Proxmox did not return an OpenID login URL: $response"
+  url="$(jq -er .data <<<"$response")" || host_capture_failure "Proxmox returned no OpenID login URL: $response"
+  [[ "$url" == "https://$(host_name auth)/auth?"* ]] || host_capture_failure "Proxmox OpenID login points at $url, expected Dex"
+  code="$(lab_public_curl --silent --max-time 15 --output /dev/null --write-out '%{http_code}' "$url")"
+  [[ "$code" == 302 || "$code" == 200 ]] || host_capture_failure "Dex refused the Proxmox login request with status $code"
+  log "Proxmox lab login reaches the Dex sign-in page"
 }
 
 host_install_dex() {
@@ -289,20 +350,20 @@ host_wait_public() {
 }
 
 host_seat_address() {
-  printf '10.88.%d.2' "$((10#$1))"
+  printf '10.88.%d.%d' "$((10#$1))" "$2"
 }
 
 host_wanted_hostnames() {
-  local number
+  local number label
   host_name auth
   printf '\n'
   host_name pve
   printf '\n'
   for number in $(host_seat_numbers); do
-    host_name "omni$number"
-    printf '\n'
-    host_name "kube$number"
-    printf '\n'
+    for label in omni kube shell; do
+      host_name "$label$number"
+      printf '\n'
+    done
   done
 }
 
@@ -312,8 +373,9 @@ host_render_ingress() {
     jq -n --arg host "$(host_name auth)" --arg service "http://127.0.0.1:$HOST_DEX_PORT" '{hostname: $host, service: $service}'
     jq -n --arg host "$(host_name pve)" '{hostname: $host, service: "https://127.0.0.1:8006", originRequest: {noTLSVerify: true}}'
     for number in $(host_seat_numbers); do
-      jq -n --arg host "$(host_name "omni$number")" --arg service "http://$(host_seat_address "$number"):8080" '{hostname: $host, service: $service}'
-      jq -n --arg host "$(host_name "kube$number")" --arg service "http://$(host_seat_address "$number"):8095" '{hostname: $host, service: $service}'
+      jq -n --arg host "$(host_name "omni$number")" --arg service "http://$(host_seat_address "$number" 2):8080" '{hostname: $host, service: $service}'
+      jq -n --arg host "$(host_name "kube$number")" --arg service "http://$(host_seat_address "$number" 2):8095" '{hostname: $host, service: $service}'
+      jq -n --arg host "$(host_name "shell$number")" --arg service "http://$(host_seat_address "$number" 3):8443" '{hostname: $host, service: $service}'
     done
     jq -n '{service: "http_status:404"}'
   )"
@@ -334,7 +396,7 @@ host_sync_tunnel() {
       tunnel_ensure_dns || exit 1
     done <<<"$wanted"
     while IFS= read -r host; do
-      [[ "$host" =~ ^(omni|kube)[0-9]{2}\. ]] || continue
+      [[ "$host" =~ ^(omni|kube|shell)[0-9]{2}\. ]] || continue
       grep -qxF "$host" <<<"$wanted" && continue
       LAB_TUNNEL_HOSTNAME="$host"
       tunnel_remove_dns || exit 1
@@ -356,6 +418,7 @@ host_up() {
   host_sync_tunnel
   host_install_services
   host_wait_local dex "http://127.0.0.1:$HOST_DEX_PORT/.well-known/openid-configuration"
+  host_ensure_realm
   host_verify
   after="$(cf_snapshot_others)" || exit 1
   [[ "$before" == "$after" ]] || die "other Cloudflare resources changed during host up. Before: $before. After: $after"
@@ -368,8 +431,10 @@ host_verify() {
   done
   host_wait_public dex "https://$(host_name auth)/.well-known/openid-configuration"
   host_wait_public proxmox "https://$(host_name pve)/"
+  host_verify_realm
   for number in $(host_seat_numbers); do
     host_wait_public "omni for seat $number" "https://$(host_name "omni$number")/"
+    host_wait_public "workspace for seat $number" "https://$(host_name "shell$number")/healthz"
   done
   log "host verified: logins at https://$(host_name auth), Proxmox at https://$(host_name pve), $(host_seat_numbers | grep -c . || true) seats"
 }
@@ -382,8 +447,15 @@ host_down() {
     die "could not list SDN vnets"
   [[ -z "$vnets" ]] || die "zone $HOST_SDN_ZONE still has vnets: $(paste -sd' ' <<<"$vnets"), run ./lab seats delete first"
   before="$(cf_snapshot_others)" || exit 1
-  pve_remote SERVICES="${HOST_SERVICES[*]}" BIN="$HOST_REMOTE_BIN" ETC="$HOST_REMOTE_ETC" ZONE="$HOST_SDN_ZONE" <<'EOF'
+  pve_remote SERVICES="${HOST_SERVICES[*]}" BIN="$HOST_REMOTE_BIN" ETC="$HOST_REMOTE_ETC" ZONE="$HOST_SDN_ZONE" \
+    REALM="$HOST_PVE_REALM" <<'EOF'
 set -euo pipefail
+if pveum user list --output-format json | grep -q "\"userid\":\"instructor@$REALM\""; then
+  pveum user delete "instructor@$REALM"
+fi
+if pveum realm list --output-format json | grep -q "\"realm\":\"$REALM\""; then
+  pveum realm delete "$REALM"
+fi
 for service in $SERVICES; do
   systemctl disable --now "$service" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$service.service"
@@ -407,6 +479,7 @@ EOF
 
   pve_ssh "systemctl list-unit-files 'talos-lab-*' --no-legend | grep -q ." && leftovers+=("talos-lab systemd units")
   pve_ssh "pvesh get /cluster/sdn/zones/$HOST_SDN_ZONE" >/dev/null 2>&1 && leftovers+=("SDN zone $HOST_SDN_ZONE")
+  pve_ssh "pveum realm list --output-format json" | grep -q "\"realm\":\"$HOST_PVE_REALM\"" && leftovers+=("Proxmox realm $HOST_PVE_REALM")
   [[ -z "$(cf_owned_tunnels)" ]] || leftovers+=("tunnels $(cf_owned_tunnels | paste -sd' ')")
   [[ -z "$(cf_owned_hostnames)" ]] || leftovers+=("DNS records $(cf_owned_hostnames | paste -sd' ')")
   ((${#leftovers[@]} == 0)) || die "host teardown left resources behind: ${leftovers[*]}"

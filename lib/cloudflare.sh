@@ -11,7 +11,7 @@ cf_tunnel_name_owned() {
 }
 
 cf_hostname_owned() {
-  [[ "$1" =~ ^((team|omni|kube)[0-9]{2}|auth|pve)\. && "${1#*.}" == "$LAB_TUNNEL_ZONE" ]]
+  [[ "$1" =~ ^((team|omni|kube|shell)[0-9]{2}|auth|pve)\. && "${1#*.}" == "$LAB_TUNNEL_ZONE" ]]
 }
 
 cf_assert_allowed() {
