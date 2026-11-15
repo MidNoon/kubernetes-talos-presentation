@@ -72,11 +72,11 @@ pve_uri() {
 }
 
 pve_wait_task() {
-  local upid="$1" timeout="${2:-300}" encoded status deadline
+  local upid="$1" timeout="${2:-300}" api="${3:-pve_api}" encoded status deadline
   deadline=$((SECONDS + timeout))
   encoded="$(pve_uri "$upid")"
   while ((SECONDS < deadline)); do
-    status="$(pve_api GET "/nodes/$PVE_NODE/tasks/$encoded/status")" || return 1
+    status="$("$api" GET "/nodes/$PVE_NODE/tasks/$encoded/status")" || return 1
     if jq -e '.data.status == "stopped"' <<<"$status" >/dev/null; then
       if jq -e '.data.exitstatus == "OK"' <<<"$status" >/dev/null; then
         return 0
@@ -90,13 +90,13 @@ pve_wait_task() {
 }
 
 pve_wait_response() {
-  local response="$1" timeout="${2:-300}" upid
+  local response="$1" timeout="${2:-300}" api="${3:-pve_api}" upid
   upid="$(jq -r 'if (.data | type) == "string" then .data else "" end' <<<"$response")" || {
     fail "Proxmox returned an unreadable response: $response"
     return 1
   }
   if [[ -n "$upid" ]]; then
-    pve_wait_task "$upid" "$timeout"
+    pve_wait_task "$upid" "$timeout" "$api"
   fi
 }
 

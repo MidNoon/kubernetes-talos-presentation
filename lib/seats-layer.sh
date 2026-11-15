@@ -280,7 +280,7 @@ seat_capture_failure() {
 }
 
 seat_wait_omni() {
-  local deadline=$((SECONDS + SEAT_OMNI_READY_TIMEOUT)) key="$SEAT_STATE/omni-service-account.key" remote="/root/talos-lab-$SEAT_NAME.key"
+  local deadline=$((SECONDS + SEAT_OMNI_READY_TIMEOUT)) key="$SEAT_STATE/omni-service-account.key" remote="/root/talos-lab-$SEAT_NAME.key" identity
   until pve_ssh "curl --silent --max-time 5 --output /dev/null http://$SEAT_OMNI_ADDR:8080/"; do
     ((SECONDS < deadline)) || seat_capture_failure "Omni for $SEAT_NAME did not answer at $SEAT_OMNI_ADDR:8080 within ${SEAT_OMNI_READY_TIMEOUT}s"
     sleep 3
@@ -295,7 +295,8 @@ seat_wait_omni() {
     pve_ssh "rm -f $remote"
     chmod 600 "$key"
   fi
-  seat_omnictl get identities >/dev/null || seat_capture_failure "the service account key for $SEAT_NAME does not work"
+  identity="$(seat_omnictl get identity "$SEAT_EMAIL" 2>&1)" ||
+    seat_capture_failure "the $SEAT_NAME Omni did not show the identity $SEAT_EMAIL to its service account: $identity"
   until seat_omnictl get talosextensions "$LAB_TALOS_VERSION" >/dev/null 2>&1; do
     ((SECONDS < deadline)) || seat_capture_failure "Omni for $SEAT_NAME never listed the extensions for Talos $LAB_TALOS_VERSION"
     sleep 3
@@ -340,7 +341,7 @@ set -euo pipefail
 if ! pveum user list --output-format json | grep -q "\"userid\":\"$USER_ID\""; then
   pveum user add "$USER_ID"
 fi
-pveum acl modify "/pool/$POOL" --users "$USER_ID" --roles PVEVMAdmin
+pveum acl modify "/pool/$POOL" --users "$USER_ID" --roles PVEVMAdmin,PVEPoolUser
 pveum acl modify "/storage/$ISO_STORAGE" --users "$USER_ID" --roles PVEDatastoreUser
 pveum acl modify "/storage/$DISK_STORAGE" --users "$USER_ID" --roles PVEDatastoreUser
 pveum acl modify "/sdn/zones/$ZONE/$VNET" --users "$USER_ID" --roles PVESDNUser

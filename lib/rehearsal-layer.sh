@@ -54,11 +54,11 @@ rehearsal_wait_link() {
 
 rehearsal_clone_vm() {
   local index="$1" response
-  response="$(pve_api POST "/nodes/$PVE_NODE/qemu/$SEAT_TEMPLATE_ID/clone" \
+  response="$(host_pve_session_api POST "/nodes/$PVE_NODE/qemu/$SEAT_TEMPLATE_ID/clone" \
     --data-urlencode "newid=${SEAT_VM_IDS[index]}" \
     --data-urlencode "name=${SEAT_VM_NAMES[index]}" \
     --data-urlencode "pool=$SEAT_NAME")" || return 1
-  pve_wait_response "$response" 300 || return 1
+  pve_wait_response "$response" 300 host_pve_session_api || return 1
   response="$(pve_api PUT "/nodes/$PVE_NODE/qemu/${SEAT_VM_IDS[index]}/config" \
     --data-urlencode "smbios1=uuid=${SEAT_MACHINE_IDS[index]}")" || return 1
   pve_wait_response "$response" 60
@@ -71,9 +71,10 @@ rehearsal_machines() {
     state="$(pve_vm_state "${SEAT_VM_IDS[index]}" "${SEAT_VM_NAMES[index]}")" || exit 1
     [[ "$state" == absent ]] || die "${SEAT_VM_NAMES[index]} already exists and is $state, run ./lab seat $SEAT reset first"
   done
+  host_pve_login "$SEAT_USER" || exit 1
   for index in "${!SEAT_VM_IDS[@]}"; do
     rehearsal_clone_vm "$index" || exit 1
-    log "cloned $SEAT_TEMPLATE_NAME into ${SEAT_VM_NAMES[index]} (${SEAT_VM_IDS[index]}) in pool $SEAT_NAME"
+    log "$SEAT_PVE_USER cloned $SEAT_TEMPLATE_NAME into ${SEAT_VM_NAMES[index]} (${SEAT_VM_IDS[index]}) in pool $SEAT_NAME"
   done
   for index in "${!SEAT_VM_IDS[@]}"; do
     pve_start_vm "${SEAT_VM_IDS[index]}" "${SEAT_VM_NAMES[index]}" || exit 1

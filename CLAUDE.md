@@ -91,7 +91,7 @@ These guests are only started, stopped or deleted when their ID and name both ma
 
 **Runs.** `flock` on `.lab/lock` prevents concurrent runs. Each `./lab` invocation loads `lab` and `lib/` fresh, so do not edit them during a multi-command sequence.
 
-**Secrets.** Connector tokens, kubeconfigs, the Proxmox root password and SSH key, Omni service account keys and seat passwords stay in `.lab/` with mode 600. `.lab/host/users.tsv` keeps each seat's password in plain text so it can be handed out, and Dex only receives the bcrypt hash. On the host and in the seat containers, `/etc/talos-lab` and `/var/lib/talos-lab` are root-only.
+**Secrets.** Connector tokens, kubeconfigs, the Proxmox root password and SSH key, Omni service account keys and seat passwords stay in `.lab/` with mode 600. `.lab/host/users.tsv` keeps each seat's password in plain text so it can be handed out, and Dex only receives the bcrypt hash. Passwords are three dash-separated groups of four lowercase letters and digits, without `l`, `o`, `0` or `1`, so they can be typed from a printed card. On the host and in the seat containers, `/etc/talos-lab` and `/var/lib/talos-lab` are root-only.
 
 ## How the layers work
 
@@ -101,26 +101,26 @@ These guests are only started, stopped or deleted when their ID and name both ma
 - It disables the enterprise apt sources, installs dnsmasq, and loads the WireGuard module.
 - It creates the SDN simple zone `talab` with DHCP, and downloads the Debian 13 container template.
 - It puts Omni, the five `omnictl` builds, Dex, cloudflared, `kubectl` and code-server in `/usr/local/lib/talos-lab`. Each is pinned by version and checksum, downloaded locally, and uploaded only when it differs.
-- It adds the Proxmox OpenID realm `lab` ("Lab login") as the default realm. That realm signs in through Dex and uses the `username` claim. It also adds `instructor@lab`, who is PVEAuditor and PVEVMAdmin on `/` and so can see and power every seat's VMs.
+- It adds the Proxmox OpenID realm `lab` ("Lab login") as the default realm. That realm signs in through Dex and takes the username from the `name` claim. It also adds `instructor@lab`, who is PVEAuditor and PVEVMAdmin on `/` and so can see and power every seat's VMs.
 
 It runs two systemd services:
 - `talos-lab-dex` serves OIDC on `127.0.0.1:5556` with static passwords from `users.tsv`. It has two clients: `omni`, with a redirect URI per seat, and `proxmox`, whose redirect URI is `https://pve.<zone>`.
 - `talos-lab-cloudflared` runs the `talos-lab-host` tunnel. That tunnel maps `auth` to Dex and `pve` to Proxmox on 8006. For each seat, it maps `omniNN` and `kubeNN` to the seat's Omni API and Kubernetes proxy, and `shellNN` to its workspace.
 
-`host verify` asks Proxmox for an OpenID login URL and checks that Dex accepts it, so the Proxmox login is proven without a password.
+`host verify` signs in through the public hostnames with the passwords in `users.tsv`, the way a browser does. The instructor signs in to Proxmox. Each seat's student signs in to the workspace, Omni and Proxmox, and must see only their own pool. A rejected password fails the run with the login that rejected it.
 
 **Seats.** Seat n gets:
 - the vnet `seatNN` on `10.88.n.0/24`, with gateway `.1` on the host, SNAT out, DHCP from `.100` to `.199`, and the host's resolver;
 - an unprivileged Debian container `omniNN` at `10.88.n.2`, with `/dev/net/tun` passed in and the host's binary directory mounted read-only at `/opt/talos-lab`. It runs one Omni with every listener on `10.88.n.2`, its own account ID and etcd key, `studentNN@<zone>` and `instructor@<zone>` as Admins, and an Admin service account whose key the lab pulls out;
 - a media preset `talos-lab` in that Omni, with the pinned Talos version and the guest agent extension. Its ISO is uploaded to Proxmox as `seatNN-talos.iso`;
 - the pool `seatNN` holding `seatNN-template`, a VM template that boots that ISO on vnet `seatNN`. The template uses q35, OVMF with pre-enrolled keys off, CPU type `host`, 2 cores, 3 GB without ballooning, VirtIO SCSI (`virtio-scsi-pci`), a 32 GB write-through discard disk, the guest agent, and boot order disk then ISO;
-- a Proxmox user `studentNN@lab` with no Proxmox password, who is PVEVMAdmin on pool `seatNN`, can use both storages, and can use only the vnet `seatNN`;
+- a Proxmox user `studentNN@lab` with no Proxmox password, who is PVEVMAdmin and PVEPoolUser on pool `seatNN`, can use both storages, and can use only the vnet `seatNN`;
 - the tunnel `talos-student-NN` for `teamNN.<zone>`, which points at the `hello` Service. Its connector token is in `site-token`;
 - an unprivileged Debian container `workspaceNN` at `10.88.n.3` that runs code-server as the user `student`, behind the seat password, at `shellNN.<zone>`. The home folder holds the student guide as `README.md` (code-server opens it at start), `manifests/` and `token.txt`. `kubectl` comes from the shared mount. `omnictl` reaches the seat's Omni directly at `10.88.n.2:8080` with an Operator service account. `connect` writes `~/.kube/config` for the student's cluster, choosing it by itself when there is exactly one;
 - `sheet.txt`, the card to hand the student, with the email, password and four links.
 
 **Rehearsal.** `./lab seat <n> up` plays the student's run:
-- It clones the template into the seat's three VMs and sets their SMBIOS UUIDs to the seat's fixed machine IDs.
+- It signs in to Proxmox as the seat's student and clones the template into the seat's three VMs with that session, as the guide has students do. The lab token then sets their SMBIOS UUIDs to the seat's fixed machine IDs.
 - It boots them one at a time and waits for each to register.
 - It syncs a cluster template named `seatNN`, which stands in for the student's clicks in Omni, and waits for Ready.
 - It fetches its own 24 hour service-account kubeconfig, which reaches the cluster through `kubeNN`, for verification. `lab_kubectl` uses that kubeconfig, so use it instead of bare `kubectl`.
@@ -148,10 +148,13 @@ It runs two systemd services:
 - Cloudflare answers native gRPC with 403, and Cloudflare Tunnel does not carry gRPC on public hostnames. The Omni web UI, the Dex login and `kubectl` through `kubeNN` work through the tunnel. The lab reaches a seat's Omni over SSH, and the workspace reaches it directly on the seat network.
 - Dex's password login asks for the email address, so students sign in as `studentNN@<zone>`.
 - The Proxmox OpenID login sends the browser's origin as the redirect URI, so the Dex `proxmox` client allows exactly `https://pve.<zone>`.
+- Dex static passwords produce no `preferred_username` claim, so the Proxmox realm reads `name`, which Dex fills from the static password's `username`. `username-claim` is set only when a realm is created, and `pveum realm modify` rejects it.
+- The Proxmox clone dialog offers only pools the user has `Pool.Audit` on, and a student without `VM.Allocate` outside their pool cannot clone without choosing it.
+- A Proxmox task's status is readable by its owner or with `Sys.Audit` on the node, so the rehearsal waits for a student's clone through the student's session.
 - Omni's Operator role cannot read identities. Checks made as the workspace's Operator service account list clusters instead.
 - A Proxmox clone gets a new SMBIOS UUID and MAC address, so three clones of one template register as three distinct Talos machines.
 - A Talos control plane runs this lab's 3-node cluster in 3 GB, so all three VMs share the template's size.
-- Code-server answers `/healthz` without a login, which is how `host verify` checks each workspace through the tunnel.
+- Code-server answers `/healthz` without a login, which is how `host verify` checks each workspace through the tunnel. It answers a wrong password with the same redirect as a right one, and only a right one sets `code-server-session`.
 - The install ISO is about 350 MB, more than Cloudflare's 100 MB request limit for proxied uploads on the free plan, so the lab stages each seat's ISO in Proxmox instead of students uploading it through `pve`.
 - Talos machines register with their seat's Omni about 30 seconds after boot, and a 3-machine cluster is Ready about 4 minutes after the template sync.
 - Deleting a cluster while its machines are online returns them to maintenance, so reset deletes the cluster before stopping VMs. When every machine is disconnected, Omni will not remove the last control plane while its cluster exists.

@@ -297,6 +297,20 @@ test_host_users_are_added_once_and_removed() {
   host_remove_user student01
   [[ ! -s "$HOST_STATE/users.tsv" ]]
 }
+test_host_passwords_avoid_look_alike_characters() {
+  local password count
+  for count in 1 2 3 4 5 6 7 8; do
+    password="$(host_random_password)"
+    [[ "$password" =~ ^[a-km-np-z2-9]{4}-[a-km-np-z2-9]{4}-[a-km-np-z2-9]{4}$ ]] || return 1
+  done
+  [[ "$(host_random_password)" != "$(host_random_password)" ]]
+}
+test_host_query_param_reads_raw_values() {
+  local url='https://pve.zone.example/?code=abc123&state=%7B%22realm%22%3A%22lab%22%7D'
+  [[ "$(host_query_param "$url" code)" == abc123 ]] || return 1
+  [[ "$(host_query_param "$url" state)" == '%7B%22realm%22%3A%22lab%22%7D' ]] || return 1
+  ! host_query_param "$url" token >/dev/null
+}
 
 test_failover_targets_only_workers() {
   [[ "$(failover_worker_index worker-a)" == 1 && "$(failover_worker_index worker-b)" == 2 ]] || return 1

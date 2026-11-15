@@ -17,6 +17,8 @@ Your instructor gives you a card for your seat, number `NN`, with an email addre
 
 A browser is all you need. Keep each link open in its own tab.
 
+Your password is three groups of four lowercase letters and digits, and you type the dashes too. It never contains `l`, `o`, `0` or `1`.
+
 ## The pieces
 
 - **Proxmox** runs virtual machines, standing in for the physical servers you would use elsewhere.
@@ -32,7 +34,7 @@ A browser is all you need. Keep each link open in its own tab.
 
 **Omni.** Open your Omni link. It sends you to a sign-in page, where you enter your email address and password. Omni opens on an empty list of machines.
 
-**Proxmox.** Open the Proxmox link. The realm is already **Lab login**, so click **Login** and sign in with the same email address and password. You see your own resource pool, `seatNN`, and nothing else.
+**Proxmox.** Open the Proxmox link. The realm is already **Lab login**, so click **Login (OpenID redirect)** and sign in with the same email address and password. You see your own resource pool, `seatNN`, and nothing else.
 
 ## Create three machines
 

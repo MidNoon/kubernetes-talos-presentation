@@ -90,7 +90,11 @@ host_omnictl_local() {
 }
 
 host_random_password() {
-  openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-16
+  local alphabet=abcdefghijkmnpqrstuvwxyz23456789 password="" byte
+  for byte in $(od -An -tu1 -N12 /dev/urandom); do
+    password+="${alphabet:byte % ${#alphabet}:1}"
+  done
+  printf '%s-%s-%s\n' "${password:0:4}" "${password:4:4}" "${password:8:4}"
 }
 
 host_ensure_user() {
@@ -270,11 +274,11 @@ host_ensure_realm() {
   pve_remote REALM="$HOST_PVE_REALM" ISSUER="https://$(host_name auth)" SECRET="$(<"$HOST_STATE/proxmox-client-secret")" \
     INSTRUCTOR="instructor@$HOST_PVE_REALM" <<'EOF'
 set -euo pipefail
-options=(--issuer-url "$ISSUER" --client-id proxmox --client-key "$SECRET" --username-claim username --scopes "openid email profile" --default 1 --comment "Lab login")
+options=(--issuer-url "$ISSUER" --client-id proxmox --client-key "$SECRET" --scopes "openid email profile" --autocreate 0 --default 1 --comment "Lab login")
 if pveum realm list --output-format json | grep -q "\"realm\":\"$REALM\""; then
   pveum realm modify "$REALM" "${options[@]}"
 else
-  pveum realm add "$REALM" --type openid --autocreate 0 "${options[@]}"
+  pveum realm add "$REALM" --type openid --username-claim name "${options[@]}"
 fi
 if ! pveum user list --output-format json | grep -q "\"userid\":\"$INSTRUCTOR\""; then
   pveum user add "$INSTRUCTOR"
@@ -284,16 +288,131 @@ EOF
   log "Proxmox realm $HOST_PVE_REALM signs in through Dex, instructor@$HOST_PVE_REALM can see and power every VM"
 }
 
-host_verify_realm() {
-  local response url code
-  response="$(curl --silent --show-error --max-time 30 --insecure --pinnedpubkey "sha256//$PVE_TLS_PIN" \
-    --data-urlencode "realm=$HOST_PVE_REALM" --data-urlencode "redirect-url=https://$(host_name pve)" \
-    "$PVE_URL/api2/json/access/openid/auth-url")" || host_capture_failure "Proxmox did not return an OpenID login URL: $response"
-  url="$(jq -er .data <<<"$response")" || host_capture_failure "Proxmox returned no OpenID login URL: $response"
-  [[ "$url" == "https://$(host_name auth)/auth?"* ]] || host_capture_failure "Proxmox OpenID login points at $url, expected Dex"
-  code="$(lab_public_curl --silent --max-time 15 --output /dev/null --write-out '%{http_code}' "$url")"
-  [[ "$code" == 302 || "$code" == 200 ]] || host_capture_failure "Dex refused the Proxmox login request with status $code"
-  log "Proxmox lab login reaches the Dex sign-in page"
+host_query_param() {
+  local url="$1" name="$2" pair
+  while IFS= read -r -d '&' pair; do
+    if [[ "${pair%%=*}" == "$name" ]]; then
+      printf '%s\n' "${pair#*=}"
+      return 0
+    fi
+  done <<<"${url#*\?}&"
+  return 1
+}
+
+host_dex_login() {
+  local start="$1" username="$2" dir status=0 form="" result=""
+  dir="$(mktemp -d)"
+  printf '%s' "$username@$LAB_TUNNEL_ZONE" >"$dir/login"
+  printf '%s' "$(host_user_password "$username")" >"$dir/password"
+  form="$(lab_public_curl --silent --show-error --max-time 30 --location --cookie "$dir/jar" --cookie-jar "$dir/jar" \
+    --output /dev/null --write-out '%{http_code} %{url_effective}' "$start" 2>&1)" || status=$?
+  if ((status == 0)) && [[ "$form" == "200 https://$(host_name auth)/auth/local/login?"* ]]; then
+    result="$(lab_public_curl --silent --show-error --max-time 60 --location --cookie "$dir/jar" --cookie-jar "$dir/jar" \
+      --data-urlencode "login@$dir/login" --data-urlencode "password@$dir/password" \
+      --output /dev/null --write-out '%{http_code} %{url_effective}' "${form#* }" 2>&1)" || status=$?
+  fi
+  rm -rf "$dir"
+  if ((status != 0)); then
+    fail "the Dex login for $username failed with curl exit $status: ${form%%\?*} ${result%%\?*}"
+    return 1
+  fi
+  if [[ "$form" != "200 https://$(host_name auth)/auth/local/login?"* ]]; then
+    fail "the login for $username did not reach the Dex password form, it ended at ${form%%\?*}"
+    return 1
+  fi
+  if [[ "${result#* }" == "${form#* }" ]]; then
+    fail "Dex rejected the password in users.tsv for $username"
+    return 1
+  fi
+  printf '%s\n' "$result"
+}
+
+host_omni_login() {
+  local username="$1" omni="$2" result
+  result="$(host_dex_login "https://$omni/login?flow=frontend&redirect=/" "$username")" || return 1
+  if [[ "$result" != "200 https://$omni/authenticate?"* ]] || ! host_query_param "${result#* }" token >/dev/null; then
+    fail "Omni at $omni did not accept the Dex login for $username, it ended at ${result%%\?*}"
+    return 1
+  fi
+}
+
+host_pve_login() {
+  local username="$1" pve response start="" result code="" state="" session
+  pve="https://$(host_name pve)"
+  if response="$(lab_public_curl --silent --show-error --max-time 30 --data-urlencode "realm=$HOST_PVE_REALM" \
+    --data-urlencode "redirect-url=$pve" "$pve/api2/json/access/openid/auth-url" 2>&1)"; then
+    start="$(jq -r '.data // empty' <<<"$response" 2>/dev/null)"
+  fi
+  if [[ -z "$start" ]]; then
+    fail "Proxmox did not return an OpenID login URL: $response"
+    return 1
+  fi
+  result="$(host_dex_login "$start" "$username")" || return 1
+  if [[ "$result" == "200 $pve/?"* ]]; then
+    code="$(host_query_param "${result#* }" code)"
+    state="$(host_query_param "${result#* }" state)"
+  fi
+  if [[ -z "$code" || -z "$state" ]]; then
+    fail "Dex did not send $username back to Proxmox with a code, it ended at ${result%%\?*}"
+    return 1
+  fi
+  response="$(lab_public_curl --silent --show-error --max-time 30 --data "code=$code" --data "state=$state" \
+    --data-urlencode "redirect-url=$pve" "$pve/api2/json/access/openid/login" 2>&1)" || response="curl failed: $response"
+  session="$(jq -r --arg user "$username@$HOST_PVE_REALM" \
+    'if .data.username == $user and .data.ticket and .data.CSRFPreventionToken then "\(.data.ticket)\n\(.data.CSRFPreventionToken)" else empty end' \
+    <<<"$response" 2>/dev/null)"
+  if [[ -z "$session" ]]; then
+    fail "Proxmox did not open a session for $username@$HOST_PVE_REALM: $(jq -c 'del(.data.ticket, .data.CSRFPreventionToken)' <<<"$response" 2>/dev/null || printf '%s' "$response")"
+    return 1
+  fi
+  HOST_PVE_TICKET="${session%%$'\n'*}"
+  HOST_PVE_CSRF="${session#*$'\n'}"
+}
+
+host_pve_session_api() {
+  local method="$1" path="$2" body status=0
+  shift 2
+  body="$(lab_public_curl --silent --show-error --fail-with-body --max-time 120 \
+    --config <(printf 'cookie = "PVEAuthCookie=%s"\nheader = "CSRFPreventionToken: %s"\n' "$HOST_PVE_TICKET" "$HOST_PVE_CSRF") \
+    -X "$method" "https://$(host_name pve)/api2/json$path" "$@" 2>&1)" || status=$?
+  if ((status != 0)); then
+    fail "Proxmox API $method $path as a lab login failed with curl exit $status: $body"
+    return 1
+  fi
+  printf '%s\n' "$body"
+}
+
+host_workspace_login() {
+  local username="$1" workspace="$2" dir status=0 result=""
+  dir="$(mktemp -d)"
+  printf '%s' "$(host_user_password "$username")" >"$dir/password"
+  lab_public_curl --silent --show-error --max-time 30 --cookie-jar "$dir/jar" --output /dev/null \
+    --data-urlencode "password@$dir/password" "https://$workspace/login" 2>"$dir/error" || status=$?
+  if ((status == 0)); then
+    result="$(lab_public_curl --silent --show-error --max-time 30 --location --cookie "$dir/jar" --output /dev/null \
+      --write-out '%{http_code} %{url_effective}' "https://$workspace/" 2>"$dir/error")" || status=$?
+  fi
+  if ((status != 0)); then
+    fail "the workspace login for $username at $workspace failed with curl exit $status: $(<"$dir/error")"
+  elif ! grep -q 'code-server-session' "$dir/jar"; then
+    fail "the workspace at $workspace rejected the password in users.tsv for $username"
+    status=1
+  elif [[ "$result" != "200 https://$workspace/"* || "$result" == "200 https://$workspace/login"* ]]; then
+    fail "the workspace at $workspace issued a session for $username but then answered $result"
+    status=1
+  fi
+  rm -rf "$dir"
+  return "$status"
+}
+
+host_verify_seat_logins() {
+  local number="$1" pools
+  host_workspace_login "student$number" "$(host_name "shell$number")" || host_capture_failure "student$number cannot sign in to the workspace"
+  host_omni_login "student$number" "$(host_name "omni$number")" || host_capture_failure "student$number cannot sign in to Omni"
+  host_pve_login "student$number" || host_capture_failure "student$number cannot sign in to Proxmox"
+  pools="$(host_pve_session_api GET /pools | jq -c '[.data[].poolid]')" || host_capture_failure "student$number cannot list Proxmox pools"
+  [[ "$pools" == "[\"seat$number\"]" ]] || host_capture_failure "student$number sees the Proxmox pools $pools, expected only seat$number"
+  log "student$number signs in to shell$number, omni$number and Proxmox, where only pool seat$number is visible"
 }
 
 host_install_dex() {
@@ -431,10 +550,12 @@ host_verify() {
   done
   host_wait_public dex "https://$(host_name auth)/.well-known/openid-configuration"
   host_wait_public proxmox "https://$(host_name pve)/"
-  host_verify_realm
+  host_pve_login instructor || host_capture_failure "instructor cannot sign in to Proxmox"
+  log "instructor signs in to Proxmox through Dex"
   for number in $(host_seat_numbers); do
     host_wait_public "omni for seat $number" "https://$(host_name "omni$number")/"
     host_wait_public "workspace for seat $number" "https://$(host_name "shell$number")/healthz"
+    host_verify_seat_logins "$number"
   done
   log "host verified: logins at https://$(host_name auth), Proxmox at https://$(host_name pve), $(host_seat_numbers | grep -c . || true) seats"
 }
