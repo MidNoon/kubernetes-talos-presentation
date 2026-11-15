@@ -4,7 +4,7 @@ Automation and teaching material for a university session. Each student gets a s
 - their own Omni;
 - their own private network;
 - a Proxmox pool and a storage of their own for install images;
-- a browser workspace with the tools, files and guide.
+- a browser workspace with the tools and files, and the guide as a step-by-step panel.
 
 Students build a Talos install image in their Omni, have Proxmox download it, make a VM template from it and clone three Talos VMs, watch them join their Omni, build a cluster of 1 control plane and 2 workers, publish a site through a Cloudflare Tunnel, and watch it survive losing a worker. They need only a browser, and one email and password sign them in everywhere.
 
@@ -21,7 +21,7 @@ Students build a Talos install image in their Omni, have Proxmox download it, ma
 ./lab seat <n> reset                         # remove every cluster, machine, VM, image and preset, keep the seat
 
 tools/site-check.sh [host:port ...]          # KVM, gateway, DNS and egress checks on a candidate site host
-tests/guards.sh                              # stubbed guard tests, no real services
+tests/guards.sh                              # stubbed guard tests, no real services, needs node and unzip
 shellcheck -s bash -x -e SC1090,SC1091,SC2034,SC2154,SC2016,SC2317,SC2024,SC2029 lab lib/*.sh tests/guards.sh tools/site-check.sh
 ```
 
@@ -31,7 +31,7 @@ A full rehearsal is `./lab proxmox up`, `./lab host up`, `./lab seats create 1`,
 | --- | --- |
 | `host up` | about 30 seconds |
 | `seats create 1` | under a minute |
-| `seat 1 up` | about 5 minutes, including the image download |
+| `seat 1 up` | 5 to 8 minutes, including the image download |
 | `seat 1 failover` | about 4.5 minutes, including the 120 second image wait |
 | `seat 1 reset` | under 2 minutes |
 | `seats delete` and `host down` | under a minute |
@@ -49,6 +49,7 @@ Running `seats create` again leaves running seats untouched, because a seat's Om
 - `lib/seats-layer.sh` builds and removes seats. `seat_omnictl` is the only path to a seat's Omni.
 - `lib/rehearsal-layer.sh`, `lib/site-layer.sh` and `lib/failover-layer.sh` play a student's run on a seat.
 - `manifests/` holds the Kubernetes manifests students apply unchanged.
+- `workspace/lab-guide/` is the code-server extension behind the workspace's **Lab guide** tab. `extension.js` builds the panel from `~/README.md`, sends commands to the `Lab` terminal, copies values and opens links. `status.js` holds the status checks, and `node status.js` prints them all as JSON. `media/` holds the panel's script, styles and icon.
 - `docker/pve-assistant/` builds the image that prepares the unattended Proxmox installer.
 - `tools/site-check.sh` runs standalone on a Proxmox host or desktop at a candidate site, with no dependency on the rest of the repo.
 
@@ -66,6 +67,7 @@ The repository is intended to become public. Account IDs, the domain and the EUL
 - `proxmox/` holds the ISO, the installer, the root password, and `ssh/` with the key and known_hosts.
 - `host/` holds the downloaded binaries, the Dex client secrets for Omni and Proxmox, `users.tsv`, the host resolver in `host-dns`, and the host tunnel token.
 - `seats/seatNN/` holds the seat's Omni account ID and etcd key, and its Admin and workspace Operator service account keys. It also holds the site tunnel token, `sheet.txt` (the card to hand the student), and the rehearsal kubeconfig, cluster template and failover runs.
+- `guide/lab-guide.vsix`, the packed guide extension.
 - `logs/` and `failures/`, which holds the context a failed run saved.
 
 `.lab/pve-target.env` is the interface between Proxmox and everything above it. `./lab proxmox up` writes it for the nested lab. For another Proxmox, write it by hand with these keys:
@@ -91,7 +93,7 @@ These guests are only started, stopped or deleted when their ID and name both ma
 
 **Runs.** `flock` on `.lab/lock` prevents concurrent runs. Each `./lab` invocation loads `lab` and `lib/` fresh, so do not edit them during a multi-command sequence.
 
-**Secrets.** Connector tokens, kubeconfigs, the Proxmox root password and SSH key, Omni service account keys and seat passwords stay in `.lab/` with mode 600. `.lab/host/users.tsv` keeps each seat's password in plain text so it can be handed out, and Dex only receives the bcrypt hash. Passwords are three dash-separated groups of four lowercase letters and digits, without `l`, `o`, `0` or `1`, so they can be typed from a printed card. On the host and in the seat containers, `/etc/talos-lab` and `/var/lib/talos-lab` are root-only.
+**Secrets.** Connector tokens, kubeconfigs, the Proxmox root password and SSH key, Omni service account keys and seat passwords stay in `.lab/` with mode 600. `.lab/host/users.tsv` keeps each seat's password in plain text so it can be handed out, and Dex only receives the bcrypt hash. Passwords are three dash-separated groups of four lowercase letters and digits, without `l`, `o`, `0` or `1`, so they can be typed from a printed card. On the host and in the seat containers, `/etc/talos-lab` and `/var/lib/talos-lab` are root-only. The workspace keeps the seat password in `~/.config/talos-lab/seat.json` with mode 600 for the guide's **Copy password** button. The panel only asks for it by name, and the extension host puts it on the clipboard, so the webview never holds it.
 
 ## How the layers work
 
@@ -116,7 +118,8 @@ It runs two systemd services:
 - the empty pool `seatNN`, and the directory storage `seatNN-iso` at `/var/lib/talos-lab/iso/seatNN` for ISOs only;
 - a Proxmox user `studentNN@lab` with no Proxmox password. They are PVEVMAdmin and PVEPoolUser on pool `seatNN`, TalosLabMedia on `seatNN-iso`, PVEDatastoreUser on the disk storage, TalosLabDownload on the node, and PVESDNUser on the vnet `seatNN` only;
 - the tunnel `talos-student-NN` for `teamNN.<zone>`, which points at the `hello` Service. Its connector token is in `site-token`;
-- an unprivileged Debian container `workspaceNN` at `10.88.n.3` that runs code-server as the user `student`, behind the seat password, at `shellNN.<zone>`. The home folder holds the student guide as `README.md` (code-server opens it at start), `manifests/` and `token.txt`. `kubectl` comes from the shared mount. `omnictl` reaches the seat's Omni directly at `10.88.n.2:8080` with an Operator service account. `connect` writes `~/.kube/config` for the student's cluster, choosing it by itself when there is exactly one;
+- an unprivileged Debian container `workspaceNN` at `10.88.n.3` that runs code-server as the user `student`, behind the seat password, at `shellNN.<zone>`, in the Dark 2026 theme with AI features and tips off. The home folder holds `README.md`, which is `docs/hands-on.md` with `NN` and `<class domain>` filled in for the seat, `manifests/` and `token.txt`. `kubectl` comes from the shared mount. `omnictl` reaches the seat's Omni directly at `10.88.n.2:8080` with an Operator service account. `connect` writes `~/.kube/config` for the student's cluster, choosing it by itself when there is exactly one;
+- the Lab guide extension in that workspace. It opens the **Lab guide** tab and a `Lab` terminal at start. Each `## ` section of the README is a step, a step's `<!-- status: id -->` marker names its check in `status.js`, and the checks poll Omni and the cluster every 10 seconds while the tab is visible. Progress lives in `~/.config/talos-lab/progress.json`. Links to `*.<zone>` open without a confirmation because code-server runs with `--link-protection-trusted-domains`. The lab reinstalls the extension whenever the packed file differs from the one recorded in `~/.config/talos-lab/lab-guide.installed`;
 - `sheet.txt`, the card to hand the student, with the email, password and four links.
 
 **Rehearsal.** `./lab seat <n> up` plays the student's run:
@@ -127,11 +130,12 @@ It runs two systemd services:
 - It fetches its own 24 hour service-account kubeconfig, which reaches the cluster through `kubeNN`, for verification. `lab_kubectl` uses that kubeconfig, so use it instead of bare `kubectl`.
 - It runs the guide's commands as `student` inside the workspace: `connect`, the CoreDNS restart (repeated until the replicas are on two nodes), applying `manifests/hello.yaml`, the Secret from `token.txt`, and applying `manifests/cloudflared.yaml`.
 - From outside, it verifies that both replicas answer through the API proxy and at `https://teamNN.<zone>`.
+- It runs the guide's status checks inside the workspace before anything else, when every check must be waiting, and after publishing, when every check must be done.
 
 `./lab seat <n> reset` returns a seat to the state `seats create` left:
 - It deletes every cluster in the seat's Omni while the machines are online.
 - It deletes every VM in pool `seatNN`, templates last, every ISO in `seatNN-iso`, every installation media preset, and every link.
-- It removes the workspace kubeconfig.
+- It removes the workspace kubeconfig and the guide's progress.
 
 **Site.** CoreDNS is restarted first, because at bootstrap both replicas land on the one node that is already Ready. `manifests/hello.yaml` is stock nginx configured by a ConfigMap, with a page that polls `/whoami` every second.
 
@@ -161,6 +165,10 @@ It runs two systemd services:
 - Omni's Operator role cannot read identities. Checks made as the workspace's Operator service account list clusters instead.
 - A Proxmox clone gets a new SMBIOS UUID and MAC address, so three clones of one template register as three distinct Talos machines.
 - A Talos control plane runs this lab's 3-node cluster in 3 GB, so all three VMs share the template's size.
+- code-server installs extensions only from a VSIX file or Open VSX. `seat_build_guide` zips `workspace/lab-guide/` into a VSIX with fixed timestamps, so an unchanged extension packs to the same checksum.
+- `install -d -o user` gives the owner only to the last folder it creates. code-server cannot create `Machine`, `logs` or `extensions` under a root-owned `~/.local/share/code-server`, so the workspace lists every level explicitly.
+- VS Code revives persistent terminal sessions a few seconds after extensions start, so the guide's own `Lab` terminal would appear twice. The workspace turns `terminal.integrated.enablePersistentSessions` off.
+- Extensions render markdown through the built-in `markdown.api.render` command, which the guide uses for each step.
 - Code-server answers `/healthz` without a login, which is how `host verify` checks each workspace through the tunnel. It answers a wrong password with the same redirect as a right one, and only a right one sets `code-server-session`.
 - The install ISO is about 370 MB, more than Cloudflare's 100 MB request limit for proxied uploads on the free plan, so students never upload it through `pve`. Proxmox downloads it from Image Factory instead.
 - Talos machines register with their seat's Omni about 30 seconds after boot, and a 3-machine cluster is Ready about 4 minutes after the template sync.
@@ -177,6 +185,10 @@ It runs two systemd services:
 - Cloudflare negative DNS responses last 30 minutes for this zone type. A lookup that happens before a record exists can cause "not found" for that long, so `lab_public_curl` resolves through a public resolver, and seats are created before anyone looks up their names.
 - `cf` writes a `.cloudflare/` cache containing account details into the working directory, and it is git-ignored.
 - In `jq`, `false // x` returns `x`. Compare booleans explicitly when `false` is a meaningful value.
+
+## Looking at the guide panel locally
+
+Run the pinned code-server from `.lab/host/bin/code-server.tar.gz` on `127.0.0.1` with `--auth none`, a test home holding a seat's `README.md` and a `seat.json` with a placeholder password, and the packed VSIX installed. Start it under `env -i` with fake `omnictl` and `kubectl` first in `PATH`, and pass `--user-data-dir` and `--extensions-dir` inside the test home. Otherwise code-server writes into `$XDG_DATA_HOME`, and the panel's terminal inherits `KUBECONFIG` and reaches whatever cluster your shell uses.
 
 ## Network requirements on a new site
 

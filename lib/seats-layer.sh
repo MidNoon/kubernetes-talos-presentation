@@ -364,7 +364,7 @@ Wants=network-online.target
 User=$SEAT_WS_USER
 WorkingDirectory=/home/$SEAT_WS_USER
 EnvironmentFile=/etc/talos-lab/code-server.env
-ExecStart=/opt/talos-lab/code-server/bin/code-server --bind-addr $SEAT_WS_ADDR:$SEAT_WS_PORT --auth password --disable-telemetry --disable-update-check --disable-workspace-trust /home/$SEAT_WS_USER
+ExecStart=/opt/talos-lab/code-server/bin/code-server --bind-addr $SEAT_WS_ADDR:$SEAT_WS_PORT --auth password --disable-telemetry --disable-update-check --disable-workspace-trust --link-protection-trusted-domains https://*.$LAB_TUNNEL_ZONE /home/$SEAT_WS_USER
 Restart=on-failure
 RestartSec=5
 
@@ -410,13 +410,77 @@ EOF
 
 seat_render_vscode_settings() {
   jq -n '{
-    "workbench.startupEditor": "readme",
+    "workbench.colorTheme": "Dark 2026",
+    "workbench.startupEditor": "none",
+    "workbench.secondarySideBar.defaultVisibility": "hidden",
+    "workbench.welcomePage.walkthroughs.openOnInstall": false,
+    "workbench.tips.enabled": false,
+    "chat.disableAIFeatures": true,
+    "extensions.ignoreRecommendations": true,
     "telemetry.telemetryLevel": "off",
     "security.workspace.trust.enabled": false,
     "terminal.integrated.defaultProfile.linux": "bash",
+    "terminal.integrated.enablePersistentSessions": false,
     "terminal.integrated.cwd": "${workspaceFolder}",
     "files.exclude": {"**/.*": true}
   }'
+}
+
+seat_render_readme() {
+  sed -E \
+    -e "s/<class domain>/$LAB_TUNNEL_ZONE/g" \
+    -e "s/\b(seat|shell|omni|team|kube|student)NN\b/\1$SEAT/g" \
+    -e "s/\`NN\`/\`$SEAT\`/g" \
+    "$LAB_ROOT/docs/hands-on.md"
+}
+
+seat_render_seat_info() {
+  jq -n \
+    --arg seat "$SEAT" \
+    --arg email "$SEAT_EMAIL" \
+    --arg password "$(host_user_password "$SEAT_USER")" \
+    --arg omni "https://$SEAT_OMNI_HOST" \
+    --arg proxmox "https://$(host_name pve)" \
+    --arg site "https://$SEAT_SITE_HOST" \
+    '{seat: $seat, email: $email, password: $password, links: {omni: $omni, proxmox: $proxmox, site: $site}}'
+}
+
+seat_guide_vsix() {
+  printf '%s/guide/lab-guide.vsix' "$LAB_STATE"
+}
+
+seat_build_guide() {
+  mkdir -p "$LAB_STATE/guide"
+  uv run --quiet python -I - "$LAB_ROOT/workspace/lab-guide" "$(seat_guide_vsix)" <<'PY' || die "could not pack the lab guide extension"
+import json
+import os
+import pathlib
+import sys
+import zipfile
+
+source, target = pathlib.Path(sys.argv[1]), sys.argv[2]
+package = json.loads((source / "package.json").read_text())
+types = """<?xml version="1.0" encoding="utf-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension=".json" ContentType="application/json"/><Default Extension=".js" ContentType="application/javascript"/><Default Extension=".css" ContentType="text/css"/><Default Extension=".svg" ContentType="image/svg+xml"/><Default Extension=".vsixmanifest" ContentType="text/xml"/></Types>
+"""
+manifest = f"""<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
+<Metadata><Identity Language="en-US" Id="{package['name']}" Version="{package['version']}" Publisher="{package['publisher']}"/><DisplayName>{package['displayName']}</DisplayName><Properties><Property Id="Microsoft.VisualStudio.Code.Engine" Value="{package['engines']['vscode']}"/></Properties></Metadata>
+<Installation><InstallationTarget Id="Microsoft.VisualStudio.Code"/></Installation>
+<Dependencies/>
+<Assets><Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true"/></Assets>
+</PackageManifest>
+"""
+entries = [("[Content_Types].xml", types.encode()), ("extension.vsixmanifest", manifest.encode())]
+entries += [("extension/" + p.relative_to(source).as_posix(), p.read_bytes()) for p in sorted(source.rglob("*")) if p.is_file()]
+with zipfile.ZipFile(target + ".part", "w") as archive:
+    for name, data in entries:
+        info = zipfile.ZipInfo(name, (2020, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.external_attr = 0o644 << 16
+        archive.writestr(info, data)
+os.replace(target + ".part", target)
+PY
 }
 
 seat_ensure_workspace() {
@@ -430,8 +494,10 @@ seat_ensure_workspace() {
   seat_render_connect | pve_ssh "cat >$stage/connect"
   seat_render_omnictl_wrapper | pve_ssh "cat >$stage/omnictl"
   seat_render_vscode_settings | pve_ssh "cat >$stage/settings.json"
+  seat_render_readme | pve_ssh "cat >$stage/README.md"
+  seat_render_seat_info | pve_ssh "cat >$stage/seat.json"
   pve_scp "$LAB_ROOT/manifests/hello.yaml" "$LAB_ROOT/manifests/cloudflared.yaml" "$PVE_SSH:$stage/manifests/"
-  pve_scp "$LAB_ROOT/docs/hands-on.md" "$PVE_SSH:$stage/README.md"
+  pve_scp "$(seat_guide_vsix)" "$PVE_SSH:$stage/lab-guide.vsix"
   pve_scp "$SEAT_STATE/site-token" "$PVE_SSH:$stage/token.txt"
   restarted="$(pve_remote CT="$SEAT_WS_ID" STAGE="$stage" WS_USER="$SEAT_WS_USER" <<'EOF'
 set -euo pipefail
@@ -439,7 +505,9 @@ trap 'rm -rf "$STAGE"' EXIT
 home="/home/$WS_USER"
 pct exec "$CT" -- id -u "$WS_USER" >/dev/null 2>&1 || pct exec "$CT" -- useradd --create-home --shell /bin/bash "$WS_USER"
 pct exec "$CT" -- install -d -m 700 /etc/talos-lab
-pct exec "$CT" -- install -d -o "$WS_USER" -g "$WS_USER" -m 755 "$home/manifests" "$home/.local/share/code-server/User"
+pct exec "$CT" -- install -d -o "$WS_USER" -g "$WS_USER" -m 755 "$home/manifests" "$home/.local" "$home/.local/share" \
+  "$home/.local/share/code-server" "$home/.local/share/code-server/User" "$home/.local/share/code-server/extensions"
+pct exec "$CT" -- install -d -o "$WS_USER" -g "$WS_USER" -m 700 "$home/.config" "$home/.config/talos-lab"
 pct exec "$CT" -- ln -sfn /opt/talos-lab/kubectl /usr/local/bin/kubectl
 changed=false
 push() {
@@ -461,6 +529,14 @@ uid="$(pct exec "$CT" -- id -u "$WS_USER")"
 push "$STAGE/settings.json" "$home/.local/share/code-server/User/settings.json" 644 "$uid:$gid" || true
 push "$STAGE/README.md" "$home/README.md" 644 "$uid:$gid" || true
 push "$STAGE/token.txt" "$home/token.txt" 600 "$uid:$gid" || true
+push "$STAGE/seat.json" "$home/.config/talos-lab/seat.json" 600 "$uid:$gid" || true
+push "$STAGE/lab-guide.vsix" "$home/.config/talos-lab/lab-guide.vsix" 644 "$uid:$gid" || true
+guide="$(sha256sum "$STAGE/lab-guide.vsix" | cut -d' ' -f1)"
+if [[ "$(pct exec "$CT" -- cat "$home/.config/talos-lab/lab-guide.installed" 2>/dev/null || true)" != "$guide" ]]; then
+  pct exec "$CT" -- su - "$WS_USER" -c "/opt/talos-lab/code-server/bin/code-server --install-extension $home/.config/talos-lab/lab-guide.vsix --force" >/dev/null
+  pct exec "$CT" -- su - "$WS_USER" -c "printf '%s' $guide >$home/.config/talos-lab/lab-guide.installed"
+  changed=true
+fi
 for manifest in "$STAGE"/manifests/*.yaml; do
   push "$manifest" "$home/manifests/$(basename "$manifest")" 644 "$uid:$gid" || true
 done
@@ -549,6 +625,7 @@ seats_create() {
   done
   host_install_dex
   host_sync_tunnel
+  seat_build_guide
   for ((number = 1; number <= count; number++)); do
     seat_create "$number"
   done

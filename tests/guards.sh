@@ -355,6 +355,47 @@ test_lab_exit_hooks_run_each_once() {
   [[ "$(paste -sd' ' "$out")" == "first second" ]]
 }
 
+test_guide_readme_is_personal_to_the_seat() {
+  local readme
+  seat_use 7
+  readme="$(seat_render_readme)"
+  ! grep -qE '(seat|shell|omni|team|kube|student)NN|`NN`|<class domain>' <<<"$readme" || return 1
+  grep -qF 'https://omni07.zone.example' <<<"$readme" || return 1
+  grep -qF '`seat07-iso`' <<<"$readme"
+}
+test_guide_status_markers_name_existing_checks() {
+  local markers checks
+  markers="$(grep -oE '<!-- status: [a-z-]+ -->' "$LAB_ROOT/docs/hands-on.md" | awk '{print $3}' | sort)"
+  checks="$(node -e 'console.log(Object.keys(require(process.argv[1]).CHECKS).sort().join("\n"))' "$LAB_ROOT/workspace/lab-guide/status.js")"
+  [[ -n "$markers" && "$markers" == "$checks" ]]
+}
+test_guide_reads_concatenated_omni_json() {
+  node -e '
+    const { splitJson } = require(process.argv[1]);
+    const objects = splitJson(`{"metadata":{"id":"a"},"spec":{"note":"} {"}}\n{"metadata":{"id":"b"}}`);
+    process.exit(objects.length === 2 && objects[1].metadata.id === "b" ? 0 : 1);
+  ' "$LAB_ROOT/workspace/lab-guide/status.js"
+}
+test_guide_extension_packs_reproducibly() {
+  local first listing
+  seat_build_guide || return 1
+  first="$(sha256sum "$(seat_guide_vsix)" | cut -d' ' -f1)"
+  seat_build_guide || return 1
+  [[ "$(sha256sum "$(seat_guide_vsix)" | cut -d' ' -f1)" == "$first" ]] || return 1
+  listing="$(unzip -Z1 "$(seat_guide_vsix)")"
+  for entry in extension.vsixmanifest extension/package.json extension/extension.js extension/status.js extension/media/guide.js extension/media/guide.css; do
+    grep -qxF "$entry" <<<"$listing" || return 1
+  done
+}
+test_guide_seat_info_carries_the_seat_links() {
+  local info
+  seat_use 3
+  printf 'student03\tstudent03@zone.example\t%s\thash\tid\n' "$SECRET_PASSWORD" >"$HOST_STATE/users.tsv"
+  info="$(seat_render_seat_info)"
+  jq -e '.seat == "03" and .email == "student03@zone.example" and .links.omni == "https://omni03.zone.example" and .links.proxmox == "https://pve.zone.example" and .links.site == "https://team03.zone.example"' <<<"$info" >/dev/null || return 1
+  [[ "$(jq -r .password <<<"$info" | wc -c)" -gt 1 ]]
+}
+
 passed=0
 failed=0
 for name in $(declare -F | awk '{print $3}' | grep '^test_'); do

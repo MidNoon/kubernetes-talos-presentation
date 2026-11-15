@@ -1,0 +1,23 @@
+{
+  "name": "lab-guide",
+  "displayName": "Lab Guide",
+  "publisher": "talos-lab",
+  "version": "1.0.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onWebviewPanel:labGuide"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "labGuide.open",
+        "title": "Open the lab guide",
+        "category": "Lab"
+      }
+    ]
+  }
+}

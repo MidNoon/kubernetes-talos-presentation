@@ -260,11 +260,22 @@ rehearsal_tunnel_verify() {
   log "site published: both connectors on 2 nodes and both replicas answering at https://$SEAT_SITE_HOST"
 }
 
+rehearsal_guide_status() {
+  local expected="$1" output
+  output="$(seat_workspace_run '/opt/talos-lab/code-server/lib/node "$(ls -d ~/.local/share/code-server/extensions/talos-lab.lab-guide-*/ | tail -1)status.js"' 2>&1)" ||
+    rehearsal_capture_failure "the lab guide status checks did not run in the workspace: $output"
+  jq -e --argjson expected "$expected" 'length > 0 and (to_entries | all(.value.done == $expected))' <<<"$output" >/dev/null 2>&1 ||
+    rehearsal_capture_failure "the lab guide status checks are not all done=$expected: $output"
+  log "lab guide status: $(jq -r 'to_entries | map("\(.key) \(.value.text)") | join("; ")' <<<"$output")"
+}
+
 seat_up() {
   rehearsal_load "$1"
+  rehearsal_guide_status false
   rehearsal_machines
   rehearsal_cluster
   rehearsal_student_site
+  rehearsal_guide_status true
   log "$SEAT_NAME rehearsal up: https://$SEAT_SITE_HOST"
 }
 
@@ -302,7 +313,7 @@ seat_reset() {
     seat_omnictl delete link "$id" >/dev/null 2>&1 || exit 1
   done
   rm -rf "$(lab_kubeconfig)" "$SEAT_STATE/cluster.yaml"
-  pve_ssh "pct exec $SEAT_WS_ID -- rm -rf /home/$SEAT_WS_USER/.kube" || exit 1
+  pve_ssh "pct exec $SEAT_WS_ID -- rm -rf /home/$SEAT_WS_USER/.kube /home/$SEAT_WS_USER/.config/talos-lab/progress.json" || exit 1
   [[ -z "$(rehearsal_cluster_names)" ]] || die "clusters remain after reset"
   raw="$(seat_omnictl get links -o json)" || exit 1
   [[ "$(jq -s 'length' <<<"$raw")" == 0 ]] || die "machines remain in the $SEAT_NAME Omni after reset"

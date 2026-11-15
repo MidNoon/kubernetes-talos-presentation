@@ -30,7 +30,7 @@ Your password is three groups of four lowercase letters and digits, and you type
 
 ## Sign in
 
-**Workspace.** Open your workspace link and enter your password. This guide opens there as `README.md`. The file list on the left holds the `manifests` folder and `token.txt`. Open a terminal from the menu with **Terminal**, then **New Terminal**.
+**Workspace.** Open your workspace link and enter your password. This guide opens there as the **Lab guide** tab, one step at a time, with a terminal below it. **Run in terminal** runs a command for you, and clicking a value such as a name copies it. The buttons at the top open your Omni, Proxmox and site, and copy your email and password for signing in. Where the lab can see your progress, a status line shows it. The file list on the left holds `README.md` (this guide as one page), the `manifests` folder and `token.txt`.
 
 **Omni.** Open your Omni link. It sends you to a sign-in page, where you enter your email address and password. Omni then shows a card with a **Log In** button and finishes signing you in by itself within a few seconds, so leave the button alone. Omni opens on an empty list of machines.
 
@@ -97,9 +97,13 @@ Clone twice more, as `talos-worker-a` and `talos-worker-b`, then start all three
 
 ## Watch your machines appear
 
+<!-- status: machines -->
+
 Go back to **Machines** in Omni. Each machine appears within about a minute of starting, with no login and no configuration from you. The install image did that work.
 
 ## Create the cluster
+
+<!-- status: cluster -->
 
 In Omni, go to **Clusters** and click **Create Cluster**:
 
@@ -113,6 +117,8 @@ Allow about five minutes. Talos installs itself to each disk and reboots, then K
 
 ## Connect to the cluster
 
+<!-- status: nodes -->
+
 In your workspace terminal, run:
 
 ```bash
@@ -123,6 +129,8 @@ kubectl get nodes
 `connect` asks your Omni for access to the cluster you just made. You should see three nodes, all `Ready`.
 
 ## Spread cluster DNS across your nodes
+
+<!-- status: coredns -->
 
 Services inside a cluster find each other through DNS, provided by two CoreDNS pods. They usually start on the same node, because at startup only one node is ready. If that node failed, name lookups in your cluster would stop, so restart them to spread them out:
 
@@ -135,6 +143,8 @@ kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide
 The `NODE` column should show two different nodes. If it shows the same node twice, run the restart again.
 
 ## Deploy your site
+
+<!-- status: site -->
 
 ```bash
 kubectl apply -f manifests/hello.yaml
@@ -150,6 +160,8 @@ You should see two `hello` pods on two different workers. Open `manifests/hello.
 - The **Service** gives both replicas a single stable address.
 
 ## Publish it to the internet
+
+<!-- status: publish -->
 
 Your tunnel token is in `token.txt`. Treat it like a password. Store it in the cluster as a Secret, then start the tunnel connectors:
 
