@@ -34,7 +34,7 @@ Your password is three groups of four lowercase letters and digits, and you type
 
 **Omni.** Open your Omni link. It sends you to a sign-in page, where you enter your email address and password. Omni then shows a card with a **Log In** button and finishes signing you in by itself within a few seconds, so leave the button alone. Omni opens on an empty list of machines.
 
-**Proxmox.** Open the Proxmox link. The realm is already **Lab login**, so click **Login (OpenID redirect)** and sign in with the same email address and password. You see your own resource pool, `seatNN`, and your own storage for install images, `seatNN-iso`, and nothing else.
+**Proxmox.** Open the Proxmox link. The realm is already **Lab login**, so click **Login (OpenID redirect)** and sign in with the same email address and password. Proxmox then says **No valid subscription**, so click **OK**. Proxmox VE is free and open source, and a subscription pays for support and its enterprise update repository, which this lab does not need. You see your own resource pool, `seatNN`, and your own storage for install images, `seatNN-iso`, and nothing else.
 
 ## Build your install image
 
