@@ -151,6 +151,8 @@ It runs two systemd services:
 - Dex static passwords produce no `preferred_username` claim, so the Proxmox realm reads `name`, which Dex fills from the static password's `username`. `username-claim` is set only when a realm is created, and `pveum realm modify` rejects it.
 - The Proxmox clone dialog offers only pools the user has `Pool.Audit` on, and a student without `VM.Allocate` outside their pool cannot clone without choosing it.
 - A Proxmox task's status is readable by its owner or with `Sys.Audit` on the node, so the rehearsal waits for a student's clone through the student's session.
+- After the Dex login, Omni's Authenticate UI Access page registers and confirms a browser key by itself, then loads the main view. Its **Log In** button stays enabled during that load. A click there registers a second key, fails to confirm it because the token has left the URL, and stores it anyway, because the confirm step reports the earlier success. Omni then answers 401 to that key and the browser returns to the sign-in page. The guide tells students to leave the button alone.
+- Omni's cluster wizard defaults to Kubernetes 1.37.1, so students select the pinned version by hand.
 - Omni's Operator role cannot read identities. Checks made as the workspace's Operator service account list clusters instead.
 - A Proxmox clone gets a new SMBIOS UUID and MAC address, so three clones of one template register as three distinct Talos machines.
 - A Talos control plane runs this lab's 3-node cluster in 3 GB, so all three VMs share the template's size.

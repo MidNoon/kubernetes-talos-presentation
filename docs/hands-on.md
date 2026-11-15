@@ -32,7 +32,7 @@ Your password is three groups of four lowercase letters and digits, and you type
 
 **Workspace.** Open your workspace link and enter your password. This guide opens there as `README.md`. The file list on the left holds the `manifests` folder and `token.txt`. Open a terminal from the menu with **Terminal**, then **New Terminal**.
 
-**Omni.** Open your Omni link. It sends you to a sign-in page, where you enter your email address and password. Omni opens on an empty list of machines.
+**Omni.** Open your Omni link. It sends you to a sign-in page, where you enter your email address and password. Omni then shows a card with a **Log In** button and finishes signing you in by itself within a few seconds, so leave the button alone. Omni opens on an empty list of machines.
 
 **Proxmox.** Open the Proxmox link. The realm is already **Lab login**, so click **Login (OpenID redirect)** and sign in with the same email address and password. You see your own resource pool, `seatNN`, and nothing else.
 
