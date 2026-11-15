@@ -18,12 +18,12 @@ readonly PROXMOX_ISO_SHA256=4e88fe416df9b527624a175f24c9aa07c714d3332afb1ee3dbf3
 readonly PROXMOX_ASSISTANT_IMAGE=talos-lab/pve-assistant:local
 readonly PROXMOX_API_USER=talos-lab@pve
 readonly PROXMOX_API_TOKEN=kit
-readonly PROXMOX_API_ROLES=PVEVMAdmin,PVEDatastoreAdmin,PVESDNUser
+readonly PROXMOX_API_ROLES=PVEVMAdmin,PVEDatastoreAdmin,PVESDNUser,PVEPoolAdmin
 readonly PROXMOX_INSTALL_TIMEOUT=1800
 readonly PROXMOX_REQUIRED_PRIVILEGES=(
   VM.Allocate VM.Audit VM.PowerMgmt VM.Config.CDROM VM.Config.CPU VM.Config.Disk
   VM.Config.Memory VM.Config.Network VM.Config.Options
-  Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use
+  Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use Pool.Allocate
 )
 
 PROXMOX_STATE="$LAB_STATE/proxmox"
@@ -356,7 +356,6 @@ proxmox_bootstrap_api() {
     printf 'PVE_TLS_PIN=%q\n' "$pin"
     printf 'PVE_ISO_STORAGE=%q\n' local
     printf 'PVE_DISK_STORAGE=%q\n' local-lvm
-    printf 'PVE_BRIDGE=%q\n' vmbr0
     printf 'PVE_SSH=%q\n' "root@$PROXMOX_ADDRESS"
     printf 'PVE_SSH_KEY=%q\n' "$PROXMOX_SSH_DIR/id_ed25519"
     printf 'PVE_SSH_KNOWN_HOSTS=%q\n' "$PROXMOX_SSH_DIR/known_hosts"
@@ -375,7 +374,7 @@ proxmox_pin_ssh() {
 }
 
 proxmox_verify() {
-  local version permissions privilege missing=() network storage status flags egress
+  local version permissions privilege missing=() storage status flags egress
   pve_load_target || exit 1
   version="$(pve_api GET /version)" || exit 1
   version="$(jq -er .data.version <<<"$version")" || die "Proxmox returned an unreadable version"
@@ -390,9 +389,6 @@ proxmox_verify() {
   ((${#missing[@]} == 0)) || die "API token $PVE_TOKEN_ID lacks privileges: ${missing[*]}"
 
   proxmox_root_session "$PVE_TLS_PIN"
-  network="$(proxmox_root_api GET "/nodes/$PVE_NODE/network/$PVE_BRIDGE")"
-  jq -e '.data.type == "bridge" and (.data.active == 1)' <<<"$network" >/dev/null ||
-    die "bridge $PVE_BRIDGE is not active on $PVE_NODE: $network"
 
   storage="$(proxmox_root_api GET "/nodes/$PVE_NODE/storage")"
   jq -e --arg s "$PVE_ISO_STORAGE" '.data | any(.storage == $s and (.content | split(",") | index("iso")))' <<<"$storage" >/dev/null ||
@@ -409,7 +405,7 @@ proxmox_verify() {
 
   pve_ssh pveversion >/dev/null || die "root SSH to $PVE_SSH with $PVE_SSH_KEY failed"
 
-  log "proxmox verified: version $version, token privileges complete, $PVE_BRIDGE active, nested virtualization exposed, outbound https working, root SSH working"
+  log "proxmox verified: version $version, token privileges complete, nested virtualization exposed, outbound https working, root SSH working"
 }
 
 proxmox_up() {

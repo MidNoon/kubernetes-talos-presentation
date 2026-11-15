@@ -1,3 +1,6 @@
+readonly LAB_TALOS_VERSION=1.14.5
+readonly LAB_KUBERNETES_VERSION=1.37.2
+
 LAB_STATE="${LAB_STATE:-$LAB_ROOT/.lab}"
 LAB_EXIT_HOOKS=()
 
@@ -24,7 +27,7 @@ log() {
 lab_scrub() {
   local text="$1"
   if [[ -n "${LAB_SCRUB:-}" ]]; then
-    text="${text//"$LAB_SCRUB"/<join-token>}"
+    text="${text//"$LAB_SCRUB"/<secret>}"
   fi
   printf '%s' "$text"
 }
@@ -43,10 +46,9 @@ lab_load_config() {
   local config="${LAB_CONFIG:-$LAB_ROOT/lab.env}" var
   [[ -r "$config" ]] || die "config not readable: $config (copy lab.env.example to lab.env)"
   source "$config"
-  for var in LAB_OMNI_PROFILE LAB_OMNI_ENDPOINT; do
+  for var in LAB_CF_ACCOUNT_ID LAB_TUNNEL_ZONE LAB_OMNI_EULA_NAME LAB_OMNI_EULA_EMAIL; do
     [[ -n "${!var:-}" ]] || die "config $config does not set $var"
   done
-  [[ "$LAB_OMNI_ENDPOINT" == https://* ]] || die "config $config has a non-https LAB_OMNI_ENDPOINT: $LAB_OMNI_ENDPOINT"
 }
 
 lab_lock() {

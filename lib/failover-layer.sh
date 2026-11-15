@@ -30,7 +30,7 @@ failover_worker_index() {
 
 failover_node_for_machine() {
   local raw
-  raw="$(omni_query get clustermachineidentities "$1" -o json)" || return 1
+  raw="$(seat_omnictl get clustermachineidentities "$1" -o json)" || return 1
   jq -er '.spec.nodename' <<<"$raw"
 }
 
@@ -180,29 +180,27 @@ failover_summarize() {
 }
 
 failover_run() {
-  local target="$1" index vmid name id node t0 url coredns_on
+  local requested="$1" target="$2" index vmid name id node t0 url coredns_on
   index="$(failover_worker_index "$target")" || exit 1
-  vmid="${LAB_VM_IDS[index]}"
-  name="${LAB_VM_NAMES[index]}"
-  id="${LAB_MACHINE_IDS[index]}"
-  lab_load_config
-  cf_load_config
-  pve_load_target || exit 1
-  site_require_cluster
-  url="https://$LAB_TUNNEL_HOSTNAME/whoami"
+  rehearsal_load "$requested"
+  [[ -s "$(lab_kubeconfig)" ]] || die "$SEAT_NAME has no cluster, run ./lab seat $SEAT up first"
+  vmid="${SEAT_VM_IDS[index]}"
+  name="${SEAT_VM_NAMES[index]}"
+  id="${SEAT_MACHINE_IDS[index]}"
+  url="https://$SEAT_SITE_HOST/whoami"
   node="$(failover_node_for_machine "$id")" || exit 1
   [[ -n "$node" ]] || die "could not find the Kubernetes node for $name"
 
-  FAILOVER_DIR="$LAB_STATE/failover/$(date +%Y%m%dT%H%M%S)-$target"
+  FAILOVER_DIR="$SEAT_STATE/failover/$(date +%Y%m%dT%H%M%S)-$target"
   mkdir -p "$FAILOVER_DIR"
-  lab_public_curl --silent --fail --max-time 8 --output /dev/null "$url" || die "$url is not answering, run ./lab tunnel up first"
+  lab_public_curl --silent --fail --max-time 8 --output /dev/null "$url" || die "$url is not answering, run ./lab seat $SEAT up first"
   [[ "$(site_distinct_nodes default app=hello)" == 2 ]] || die "hello replicas are not spread across both workers"
   [[ "$(site_distinct_nodes default app=cloudflared)" == 2 ]] || die "cloudflared replicas are not spread across both workers"
   coredns_on="$(lab_kubectl -n kube-system get pods -l k8s-app=kube-dns -o json | jq -r --arg node "$node" '[.items[] | select(.spec.nodeName == $node)] | length')"
 
   failover_wait_images_settled || die "could not read pod start times before the failover"
 
-  failover_probe_loop "$FAILOVER_DIR/probe.csv" "$url" &
+  failover_probe_loop "$FAILOVER_DIR/probe.csv" "$url" 9>&- &
   FAILOVER_PROBE_PID=$!
   lab_on_exit failover_stop_probe
   log "target is $name on node $node, which runs $coredns_on CoreDNS pods, probing $url for ${FAILOVER_BASELINE_SECONDS}s first"
@@ -210,14 +208,13 @@ failover_run() {
 
   t0="$(date +%s%3N)"
   failover_mark "hard stopping $name"
-  pve_stop_lab_vm "$vmid" || failover_capture_failure "could not stop $name"
+  pve_stop_vm "$vmid" "$name" || failover_capture_failure "could not stop $name"
   failover_mark "$name powered off"
   failover_watch_recovery "$node" || failover_capture_failure "the cluster did not recover from losing $name"
   sleep "$FAILOVER_SETTLE_SECONDS"
 
-  cap_gate || failover_capture_failure "cap gate refused restarting $name"
   failover_mark "starting $name again"
-  pve_start_lab_vm "$vmid" || failover_capture_failure "could not start $name"
+  pve_start_vm "$vmid" "$name" || failover_capture_failure "could not start $name"
   failover_wait_node_ready "$node" || failover_capture_failure "node $node did not return to Ready"
   failover_mark "node $node Ready again"
   sleep "$FAILOVER_SETTLE_SECONDS"

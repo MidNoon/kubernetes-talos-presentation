@@ -6,16 +6,17 @@ Your machines have no public IP address and no open inbound ports, and there is 
 
 ## What you need
 
-Your instructor gives you:
+Your instructor gives you a sign-in sheet for your seat, number `NN`, with:
 
-- A login for the Proxmox server.
+- Your email address, `studentNN@<class domain>`, and a password. Treat the password like any other.
+- Your Omni address, `https://omniNN.<class domain>`.
+- The Proxmox address, `https://pve.<class domain>`, where your username is `studentNN`.
+- Your site address, `https://teamNN.<class domain>`.
 - A tunnel token, which is a long string of characters. Treat it like a password.
-- Your site address, in the form `https://teamNN.<class domain>`.
 - The `manifests` folder containing `hello.yaml` and `cloudflared.yaml`.
 
 Set these up before the session:
 
-- An account at [Sidero Omni](https://siderolabs.com/omni-signup). Three machines fit within the free Hobby plan.
 - [kubectl](https://kubernetes.io/docs/tasks/tools/).
 - The `oidc-login` plugin for kubectl. On macOS or Linux, run `brew tap siderolabs/tap`, `brew trust siderolabs/tap` and `brew install siderolabs/tap/sidero-tools`. On Windows, follow the [kubelogin guide](https://github.com/int128/kubelogin#getting-started).
 
@@ -30,29 +31,26 @@ kubectl oidc-login --version
 
 - **Proxmox** runs virtual machines, standing in for the physical servers you would use elsewhere.
 - **Talos Linux** is an operating system built only to run Kubernetes. It has no shell and no SSH, and it is managed entirely through an API.
-- **Omni** is a web service that manages Talos machines and creates clusters from them.
-- **Image Factory** builds Talos install images to order. The image you download already knows how to join your Omni account.
+- **Omni** is a service that manages Talos machines and creates clusters from them. You have your own Omni for this session, and nobody else's machines appear in it.
+- **Image Factory** builds Talos install images to order. Your install image already knows how to join your Omni.
 - **Kubernetes** keeps your applications running and replaces them when something fails.
 - **Cloudflare Tunnel** carries visitors to your site over a connection your cluster opens outward, so nothing has to accept connections from the internet.
 
-## Build your install image
+## Sign in
 
-In the Omni dashboard, click **Download Installation Media** to open the **Create New Media** wizard. Choose:
+Open your Omni address. It sends you to a sign-in page, where you enter your email address and password. Omni opens on an empty list of machines.
 
-- Talos version **1.14.5**
-- Architecture **amd64**
-- Bare metal as the hardware type
-- The **qemu-guest-agent** extension, if the wizard offers extensions
+Open the Proxmox address in another tab. Choose the realm **Proxmox VE authentication server**, then sign in with the username `studentNN` and the same password. You see your own resource pool, `seatNN`, and nothing else.
 
-On the **Schematic Ready** page, download the **ISO**.
+## Your install image
 
-This image contains the details that let a machine join your account, so anyone who boots it can add a machine to your Omni. Keep it to yourself.
+Your install image is already in Proxmox as `seatNN-talos.iso`. It was built by Image Factory for your Omni with Talos **1.14.5** and the **qemu-guest-agent** extension, and it carries the details that let a machine join your Omni.
+
+To see how an image like this is made, click **Download Installation Media** in Omni and step through the wizard without downloading. Anyone who boots an image like this can add a machine to the Omni it belongs to, so it is not something to share.
 
 ## Create three virtual machines
 
-Upload your ISO in Proxmox under the `local` storage, in **ISO Images**. If your instructor has already created your VMs, attach your ISO to each one and skip to starting them.
-
-Otherwise create three VMs with **Create VM**, named and sized like this:
+In Proxmox, create three VMs with **Create VM**, named and sized like this:
 
 | VM | Cores | Memory |
 | --- | --- | --- |
@@ -64,27 +62,31 @@ Use these settings for all three:
 
 | Tab | Setting | Value |
 | --- | --- | --- |
-| OS | ISO image | Your Talos ISO |
+| General | Resource Pool | `seatNN` |
+| OS | ISO image | `seatNN-talos.iso` on `local` |
 | System | Machine | q35 |
-| System | BIOS | OVMF (UEFI), with an EFI disk |
+| System | BIOS | OVMF (UEFI), with an EFI disk on `local-lvm` |
 | System | Pre-Enroll keys | Off |
 | System | SCSI Controller | VirtIO SCSI, not VirtIO SCSI single |
 | System | Qemu Agent | On |
+| Disks | Storage | `local-lvm` |
 | Disks | Size | 32 GiB |
 | Disks | Cache | Write through |
 | Disks | Discard | On |
 | CPU | Type | host |
 | Memory | Ballooning Device | Off (under Advanced) |
-| Network | Bridge | The one your instructor names |
+| Network | Bridge | `seatNN` |
 | Network | Model | VirtIO |
 
-Two of these matter more than they look. VirtIO SCSI single can hang Talos during bootstrap, and memory ballooning stops Talos from seeing all of its memory.
+The resource pool and the bridge must be your own. Proxmox refuses a VM outside your pool, and your network `seatNN` is the only one where your Omni can see your machines.
+
+Two of the other settings matter more than they look. VirtIO SCSI single can hang Talos during bootstrap, and memory ballooning stops Talos from seeing all of its memory.
 
 Start all three VMs.
 
 ## Watch your machines appear
 
-Open **Machines** in Omni. Each VM appears within about a minute of booting, with no login and no configuration from you. The image did that work.
+Go back to **Machines** in Omni. Each VM appears within about a minute of booting, with no login and no configuration from you. The image did that work.
 
 ## Create the cluster
 
@@ -112,7 +114,7 @@ In PowerShell:
 $env:KUBECONFIG = "$HOME\Downloads\your-cluster-kubeconfig.yaml"
 ```
 
-Run this. A browser window opens the first time so you can sign in:
+Run this. A browser window opens the first time so you can sign in with the same email and password:
 
 ```bash
 kubectl get nodes
@@ -218,4 +220,4 @@ The second color returns, and this time no squares should turn red. Kubernetes s
 
 You took blank virtual machines to a public, self-healing website, and you never logged in to a server, opened a firewall port or installed an operating system by hand. These are the same tools companies use to run production systems.
 
-Your tunnel and its address stop working after the session, but your Omni account is yours to keep. With a domain of your own and a free Cloudflare account, you can set up the same thing at home on any spare computer.
+Your seat, its Omni and its tunnel are removed after the session. Sidero Omni has a free Hobby plan, so with a free Cloudflare account and a domain of your own you can build the same thing at home on any spare computer.
