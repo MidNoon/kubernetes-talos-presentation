@@ -5,7 +5,7 @@ pve_load_target() {
     return 1
   }
   source "$target"
-  for var in PVE_URL PVE_NODE PVE_TOKEN_ID PVE_TOKEN_SECRET PVE_TLS_PIN PVE_ISO_STORAGE PVE_DISK_STORAGE PVE_SSH PVE_SSH_KEY PVE_SSH_KNOWN_HOSTS; do
+  for var in PVE_URL PVE_NODE PVE_TOKEN_ID PVE_TOKEN_SECRET PVE_TLS_PIN PVE_DISK_STORAGE PVE_SSH PVE_SSH_KEY PVE_SSH_KNOWN_HOSTS; do
     [[ -n "${!var:-}" ]] || {
       fail "Proxmox target file $target does not set $var"
       return 1
@@ -157,29 +157,14 @@ pve_delete_vm() {
   pve_wait_response "$response" 300
 }
 
-pve_iso_present() {
-  local name="$1" listing
-  listing="$(pve_api GET "/nodes/$PVE_NODE/storage/$PVE_ISO_STORAGE/content?content=iso")" || return 2
-  jq -e --arg volid "$PVE_ISO_STORAGE:iso/$name" '.data | any(.volid == $volid)' <<<"$listing" >/dev/null
+pve_storage_isos() {
+  local storage="$1" listing
+  listing="$(pve_api GET "/nodes/$PVE_NODE/storage/$storage/content?content=iso")" || return 1
+  jq -r '.data[].volid' <<<"$listing"
 }
 
-pve_delete_iso() {
-  local name="$1" response status=0
-  pve_iso_present "$name" || status=$?
-  case "$status" in
-    0) ;;
-    1) return 0 ;;
-    *) return 1 ;;
-  esac
-  response="$(pve_api DELETE "/nodes/$PVE_NODE/storage/$PVE_ISO_STORAGE/content/$(pve_uri "$PVE_ISO_STORAGE:iso/$name")")" || return 1
+pve_delete_volume() {
+  local volid="$1" storage="${1%%:*}" response
+  response="$(pve_api DELETE "/nodes/$PVE_NODE/storage/$storage/content/$(pve_uri "$volid")")" || return 1
   pve_wait_response "$response" 120
-}
-
-pve_upload_iso() {
-  local file="$1" name="$2" response
-  response="$(pve_api POST "/nodes/$PVE_NODE/storage/$PVE_ISO_STORAGE/upload" \
-    --max-time 1800 \
-    -F content=iso \
-    -F "filename=@$file;filename=$name")" || return 1
-  pve_wait_response "$response" 600
 }

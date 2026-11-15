@@ -24,7 +24,7 @@ Your password is three groups of four lowercase letters and digits, and you type
 - **Proxmox** runs virtual machines, standing in for the physical servers you would use elsewhere.
 - **Talos Linux** is an operating system built only to run Kubernetes. It has no shell and no SSH, and it is managed entirely through an API.
 - **Omni** is a service that manages Talos machines and creates clusters from them. You have your own Omni for this session, and nobody else's machines appear in it.
-- **Image Factory** builds Talos install images to order. Your install image already knows how to join your Omni.
+- **Image Factory** builds Talos install images to order. You build one that knows how to join your Omni.
 - **Kubernetes** keeps your applications running and replaces them when something fails.
 - **Cloudflare Tunnel** carries visitors to your site over a connection your cluster opens outward, so nothing has to accept connections from the internet.
 
@@ -34,23 +34,66 @@ Your password is three groups of four lowercase letters and digits, and you type
 
 **Omni.** Open your Omni link. It sends you to a sign-in page, where you enter your email address and password. Omni then shows a card with a **Log In** button and finishes signing you in by itself within a few seconds, so leave the button alone. Omni opens on an empty list of machines.
 
-**Proxmox.** Open the Proxmox link. The realm is already **Lab login**, so click **Login (OpenID redirect)** and sign in with the same email address and password. You see your own resource pool, `seatNN`, and nothing else.
+**Proxmox.** Open the Proxmox link. The realm is already **Lab login**, so click **Login (OpenID redirect)** and sign in with the same email address and password. You see your own resource pool, `seatNN`, and your own storage for install images, `seatNN-iso`, and nothing else.
+
+## Build your install image
+
+A Talos machine joins your Omni because its install image tells it where your Omni is. You build that image in Omni.
+
+In Omni, open **Installation Media** and click **Create New Media**. Step through the wizard:
+
+- **Hardware Type:** Bare-metal Machine. Its description covers generic virtual machines, which is what Proxmox gives you.
+- **Talos Version:** 1.14.5. Leave the join token and the HTTP/2 tunnel option as they are.
+- **Machine Architecture:** amd64.
+- **System Extensions:** search for `qemu-guest-agent` and select `siderolabs/qemu-guest-agent`. Extensions add to Talos what its minimal image leaves out, and this one lets Proxmox see inside the machine, for example its IP address.
+- **Extra Args:** nothing, so move on.
+
+On the last page, find **ISO** under **First Boot** and click its **Copy link** button.
+
+The link points at Image Factory, which builds your image when it is first asked for. The image carries your Omni's address and a join token, so anything that boots it joins your Omni and nobody else's.
+
+## Bring the image into Proxmox
+
+In Proxmox, select your storage **seatNN-iso** in the tree on the left and open **ISO Images**. Click **Download from URL**, paste the link and click **Query URL**, which fills in the file name. Click **Download**.
+
+Proxmox fetches the image from Image Factory itself, so the 370 MB file never passes through your browser. It takes a minute or two.
+
+## Make a template
+
+Click **Create VM** at the top right. Change only these settings and leave the rest at their defaults:
+
+| Tab | Setting | Value |
+| --- | --- | --- |
+| General | Name | `talos-template` |
+| General | Resource Pool | `seatNN` |
+| OS | Storage, ISO image | `seatNN-iso`, the image you downloaded |
+| System | SCSI Controller | VirtIO SCSI |
+| System | Qemu Agent | ticked |
+| CPU | Cores | 2 |
+| Memory | Memory (MiB) | 3072 |
+| Memory | Ballooning Device | unticked, shown when you tick **Advanced** at the bottom |
+| Network | Bridge | `seatNN` |
+
+On **Confirm**, leave **Start after created** unticked and click **Finish**.
+
+Each of these matters:
+- Proxmox lets you create machines only in your own pool.
+- The default, VirtIO SCSI single, can hang Talos during bootstrap.
+- The Qemu Agent setting pairs with the extension you put in the image.
+- A memory balloon stops Talos from seeing all of its memory.
+- The bridge `seatNN` is your private network, where your Omni is. Your machines reach Omni there, not through the internet.
+
+Right-click the new machine and choose **Convert to template**. A template never runs. It is the master copy you clone machines from, so all three start out identical.
 
 ## Create three machines
 
-Your pool holds `seatNN-template`, a virtual machine template that is already set up for Talos. It boots your install image, `seatNN-talos.iso`, which Image Factory built for your Omni. It sits on your own network, `seatNN`, where your Omni can see it.
-
-Right-click the template and choose **Clone**. Fill in:
+Right-click `talos-template` and choose **Clone**. Fill in:
 
 - **Name:** `talos-cp`
 - **Mode:** Linked Clone
 - **Resource Pool:** `seatNN`
 
-Proxmox refuses a clone outside your pool, so the pool matters. Clone twice more, as `talos-worker-a` and `talos-worker-b`, then start all three.
-
-To see what the template is made of, select it and open **Hardware**. Two settings matter more than they look:
-- The SCSI controller is **VirtIO SCSI**, because VirtIO SCSI single can hang Talos during bootstrap.
-- **Ballooning** is off, because a memory balloon stops Talos from seeing all of its memory.
+Clone twice more, as `talos-worker-a` and `talos-worker-b`, then start all three. A linked clone shares the template's disk and stores only its own changes, so it is ready in seconds. Each clone still gets its own hardware ID and network address, so Omni sees three different machines.
 
 ## Watch your machines appear
 
@@ -61,7 +104,7 @@ Go back to **Machines** in Omni. Each machine appears within about a minute of s
 In Omni, go to **Clusters** and click **Create Cluster**:
 
 - Give it a name.
-- Select Talos **1.14.5** and Kubernetes **1.37.2**.
+- Select Talos **1.14.5**. Omni offers Kubernetes 1.37.1, but 1.37.2 is out, so select **1.37.2**. Patch releases carry fixes, and keeping up with them is part of running a cluster.
 - Under **Available Machines**, click **CP** on one machine to make it the control plane.
 - Click **W0** on the other two to make them workers.
 - Click **Create Cluster**.

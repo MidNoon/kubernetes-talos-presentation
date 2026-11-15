@@ -13,8 +13,6 @@ readonly SEAT_VM_ROLES=(cp worker-a worker-b)
 readonly SEAT_VM_MEMORY_MIB=3072
 readonly SEAT_VM_CORES=2
 readonly SEAT_VM_DISK_GIB=32
-readonly SEAT_EXTENSION=siderolabs/qemu-guest-agent
-readonly SEAT_PRESET=talos-lab
 readonly SEAT_OMNI_READY_TIMEOUT=300
 
 SEAT_OMNI_FORWARD=""
@@ -59,6 +57,8 @@ seat_use() {
   SEAT_SITE_HOST="$(host_name "team$SEAT")"
   SEAT_SHELL_HOST="$(host_name "shell$SEAT")"
   SEAT_SITE_TUNNEL="talos-student-$SEAT"
+  SEAT_ISO_STORAGE="$(host_seat_iso_storage "$SEAT")"
+  SEAT_ISO_PATH="$HOST_ISO_ROOT/$SEAT_NAME"
   SEAT_ISO="$SEAT_NAME-talos.iso"
   SEAT_CLUSTER="$SEAT_NAME"
 }
@@ -304,29 +304,6 @@ seat_wait_omni() {
   log "Omni for $SEAT_NAME running at $SEAT_OMNI_ADDR with Talos $LAB_TALOS_VERSION available"
 }
 
-seat_ensure_iso() {
-  local presets dir="$SEAT_STATE/media" iso status=0
-  pve_iso_present "$SEAT_ISO" || status=$?
-  case "$status" in
-    0) return 0 ;;
-    1) ;;
-    *) exit 1 ;;
-  esac
-  presets="$(seat_omnictl get installationmediaconfigs -o json)" || exit 1
-  if ! jq -e -s --arg p "$SEAT_PRESET" 'any(.[]; .metadata.id == $p)' <<<"$presets" >/dev/null 2>&1; then
-    seat_omnictl media preset create "$SEAT_PRESET" --talos-version "$LAB_TALOS_VERSION" --extensions "$SEAT_EXTENSION" >/dev/null || exit 1
-  fi
-  rm -rf "$dir"
-  mkdir -p "$dir"
-  log "downloading the $SEAT_NAME install image from its Omni"
-  LAB_OMNI_TIMEOUT=1800 seat_omnictl media download "$SEAT_PRESET" --output "$dir/" >/dev/null 2>&1 || exit 1
-  iso="$(find "$dir" -maxdepth 1 -type f -name '*.iso' -print -quit)"
-  [[ -n "$iso" ]] || die "no ISO in $dir after the download"
-  pve_upload_iso "$iso" "$SEAT_ISO" || exit 1
-  rm -rf "$dir"
-  log "install image uploaded as $SEAT_ISO"
-}
-
 seat_ensure_pool() {
   pve_remote POOL="$SEAT_NAME" <<'EOF'
 set -euo pipefail
@@ -334,49 +311,31 @@ pveum pool list --output-format json | grep -q "\"poolid\":\"$POOL\"" || pveum p
 EOF
 }
 
+seat_ensure_iso_storage() {
+  pve_remote STORAGE="$SEAT_ISO_STORAGE" DIR="$SEAT_ISO_PATH" <<'EOF'
+set -euo pipefail
+if ! pvesm status --storage "$STORAGE" >/dev/null 2>&1; then
+  pvesm add dir "$STORAGE" --path "$DIR" --content iso --create-base-path 1 --create-subdirs 1
+fi
+EOF
+  log "storage $SEAT_ISO_STORAGE holds $SEAT_NAME install images at $SEAT_ISO_PATH"
+}
+
 seat_ensure_proxmox_user() {
-  pve_remote USER_ID="$SEAT_PVE_USER" POOL="$SEAT_NAME" \
-    ISO_STORAGE="$PVE_ISO_STORAGE" DISK_STORAGE="$PVE_DISK_STORAGE" ZONE="$HOST_SDN_ZONE" VNET="$SEAT_VNET" <<'EOF'
+  pve_remote USER_ID="$SEAT_PVE_USER" POOL="$SEAT_NAME" NODE="$PVE_NODE" ISO_STORAGE="$SEAT_ISO_STORAGE" \
+    DISK_STORAGE="$PVE_DISK_STORAGE" ZONE="$HOST_SDN_ZONE" VNET="$SEAT_VNET" \
+    MEDIA_ROLE="$HOST_MEDIA_ROLE" DOWNLOAD_ROLE="$HOST_DOWNLOAD_ROLE" <<'EOF'
 set -euo pipefail
 if ! pveum user list --output-format json | grep -q "\"userid\":\"$USER_ID\""; then
   pveum user add "$USER_ID"
 fi
 pveum acl modify "/pool/$POOL" --users "$USER_ID" --roles PVEVMAdmin,PVEPoolUser
-pveum acl modify "/storage/$ISO_STORAGE" --users "$USER_ID" --roles PVEDatastoreUser
+pveum acl modify "/storage/$ISO_STORAGE" --users "$USER_ID" --roles "$MEDIA_ROLE"
 pveum acl modify "/storage/$DISK_STORAGE" --users "$USER_ID" --roles PVEDatastoreUser
+pveum acl modify "/nodes/$NODE" --users "$USER_ID" --roles "$DOWNLOAD_ROLE"
 pveum acl modify "/sdn/zones/$ZONE/$VNET" --users "$USER_ID" --roles PVESDNUser
 EOF
-  log "Proxmox user $SEAT_PVE_USER limited to pool $SEAT_NAME and vnet $SEAT_VNET"
-}
-
-seat_ensure_template() {
-  local state response
-  state="$(pve_vm_state "$SEAT_TEMPLATE_ID" "$SEAT_TEMPLATE_NAME")" || exit 1
-  [[ "$state" == absent ]] || return 0
-  response="$(pve_api POST "/nodes/$PVE_NODE/qemu" \
-    --data-urlencode "vmid=$SEAT_TEMPLATE_ID" \
-    --data-urlencode "name=$SEAT_TEMPLATE_NAME" \
-    --data-urlencode "pool=$SEAT_NAME" \
-    --data-urlencode "ostype=l26" \
-    --data-urlencode "machine=q35" \
-    --data-urlencode "bios=ovmf" \
-    --data-urlencode "efidisk0=$PVE_DISK_STORAGE:1,efitype=4m,pre-enrolled-keys=0" \
-    --data-urlencode "cpu=host" \
-    --data-urlencode "sockets=1" \
-    --data-urlencode "cores=$SEAT_VM_CORES" \
-    --data-urlencode "memory=$SEAT_VM_MEMORY_MIB" \
-    --data-urlencode "balloon=0" \
-    --data-urlencode "scsihw=virtio-scsi-pci" \
-    --data-urlencode "scsi0=$PVE_DISK_STORAGE:$SEAT_VM_DISK_GIB,discard=on,cache=writethrough" \
-    --data-urlencode "ide2=$PVE_ISO_STORAGE:iso/$SEAT_ISO,media=cdrom" \
-    --data-urlencode "net0=virtio,bridge=$SEAT_VNET" \
-    --data-urlencode "boot=order=scsi0;ide2" \
-    --data-urlencode "agent=enabled=1" \
-    --data-urlencode "onboot=0")" || exit 1
-  pve_wait_response "$response" 300 || exit 1
-  response="$(pve_api POST "/nodes/$PVE_NODE/qemu/$SEAT_TEMPLATE_ID/template")" || exit 1
-  pve_wait_response "$response" 300 || exit 1
-  log "template $SEAT_TEMPLATE_NAME ($SEAT_TEMPLATE_ID) in pool $SEAT_NAME, booting $SEAT_ISO on $SEAT_VNET"
+  log "Proxmox user $SEAT_PVE_USER limited to pool $SEAT_NAME, storage $SEAT_ISO_STORAGE and vnet $SEAT_VNET, and can download from URLs"
 }
 
 seat_workspace_service_account() {
@@ -565,9 +524,8 @@ seat_create() {
   seat_ensure_vnet
   seat_ensure_container
   seat_wait_omni
-  seat_ensure_iso
   seat_ensure_pool
-  seat_ensure_template
+  seat_ensure_iso_storage
   seat_ensure_proxmox_user
   seat_ensure_site_tunnel
   seat_ensure_workspace
@@ -601,10 +559,12 @@ seats_create() {
 }
 
 seat_remote_numbers() {
-  local vnets tunnels
+  local vnets tunnels storages
   vnets="$(pve_ssh "pvesh get /cluster/sdn/vnets --output-format json" | jq -r --arg zone "$HOST_SDN_ZONE" '.[] | select(.zone == $zone) | .vnet')" || return 1
+  storages="$(pve_api GET /storage | jq -r '.data[].storage')" || return 1
   tunnels="$(cf_owned_tunnels)" || return 1
   {
+    sed -n 's/^seat\([0-9][0-9]\)-iso$/\1/p' <<<"$storages"
     sed -n 's/^seat\([0-9][0-9]\)$/\1/p' <<<"$vnets"
     sed -n 's/^talos-student-\([0-9][0-9]\)$/\1/p' <<<"$tunnels"
     host_seat_numbers
@@ -651,10 +611,14 @@ seat_delete() {
   pve_delete_vm "$SEAT_TEMPLATE_ID" "$SEAT_TEMPLATE_NAME" || exit 1
   seat_destroy_ct "$SEAT_WS_ID" "$SEAT_WS_NAME"
   seat_destroy_ct "$SEAT_CT_ID" "$SEAT_CT_NAME"
-  pve_delete_iso "$SEAT_ISO" || exit 1
-  pve_remote ZONE="$HOST_SDN_ZONE" VNET="$SEAT_VNET" SUBNET="$SEAT_SUBNET" USER_ID="$SEAT_PVE_USER" POOL="$SEAT_NAME" <<'EOF'
+  pve_remote ZONE="$HOST_SDN_ZONE" VNET="$SEAT_VNET" SUBNET="$SEAT_SUBNET" USER_ID="$SEAT_PVE_USER" POOL="$SEAT_NAME" \
+    STORAGE="$SEAT_ISO_STORAGE" DIR="$SEAT_ISO_PATH" <<'EOF'
 set -euo pipefail
 subnet_id="$ZONE-${SUBNET/\//-}"
+if pvesm status --storage "$STORAGE" >/dev/null 2>&1; then
+  pvesm remove "$STORAGE"
+fi
+rm -rf "$DIR"
 pveum user list --output-format json | grep -q "\"userid\":\"$USER_ID\"" && pveum user delete "$USER_ID"
 pveum pool list --output-format json | grep -q "\"poolid\":\"$POOL\"" && pveum pool delete "$POOL"
 changed=false

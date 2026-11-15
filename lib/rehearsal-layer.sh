@@ -2,6 +2,10 @@ readonly REHEARSAL_LINK_TIMEOUT=420
 readonly REHEARSAL_CLUSTER_TIMEOUT=1500
 readonly REHEARSAL_NODE_TIMEOUT=420
 readonly REHEARSAL_DELETE_TIMEOUT=900
+readonly REHEARSAL_DOWNLOAD_TIMEOUT=900
+readonly REHEARSAL_PRESET=talos-lab
+readonly REHEARSAL_EXTENSION=siderolabs/qemu-guest-agent
+readonly REHEARSAL_CPU_TYPE=x86-64-v2-AES
 
 lab_kubeconfig() {
   printf '%s/kubeconfig' "$SEAT_STATE"
@@ -24,6 +28,9 @@ rehearsal_capture_failure() {
   for index in "${!SEAT_VM_IDS[@]}"; do
     pve_api GET "/nodes/$PVE_NODE/qemu/${SEAT_VM_IDS[index]}/config" >"$dir/vm-${SEAT_VM_NAMES[index]}-config.json" 2>&1 || true
   done
+  pve_api GET "/nodes/$PVE_NODE/qemu/$SEAT_TEMPLATE_ID/config" >"$dir/vm-$SEAT_TEMPLATE_NAME-config.json" 2>&1 || true
+  pve_api GET "/nodes/$PVE_NODE/storage/$SEAT_ISO_STORAGE/content" >"$dir/$SEAT_ISO_STORAGE-content.json" 2>&1 || true
+  pve_api GET "/nodes/$PVE_NODE/tasks?limit=20&errors=1" >"$dir/failed-tasks.json" 2>&1 || true
   seat_omnictl get links -o json >"$dir/links.json" 2>&1 || true
   seat_omnictl get machinestatus -o json >"$dir/machinestatus.json" 2>&1 || true
   seat_omnictl get clusterstatus "$SEAT_CLUSTER" -o json >"$dir/clusterstatus.json" 2>&1 || true
@@ -52,6 +59,68 @@ rehearsal_wait_link() {
   fail "link for $id stayed at connected=${state:-absent}, wanted connected=$wanted after ${REHEARSAL_LINK_TIMEOUT}s"
 }
 
+rehearsal_image_url() {
+  local presets preset factory output pxe
+  presets="$(seat_omnictl get installationmediaconfigs -o json)" || return 1
+  if ! jq -e -s --arg p "$REHEARSAL_PRESET" 'any(.[]; .metadata.id == $p)' <<<"$presets" >/dev/null 2>&1; then
+    seat_omnictl media preset create "$REHEARSAL_PRESET" --talos-version "$LAB_TALOS_VERSION" --extensions "$REHEARSAL_EXTENSION" >/dev/null || return 1
+  fi
+  preset="$(seat_omnictl get installationmediaconfigs "$REHEARSAL_PRESET" -o json)" || return 1
+  factory="$(jq -er '.spec.imagefactoryurl' <<<"$preset")" || {
+    fail "preset $REHEARSAL_PRESET names no image factory: $preset"
+    return 1
+  }
+  output="$(seat_omnictl media download "$REHEARSAL_PRESET" --format pxe 2>&1)" || {
+    fail "omnictl could not print the PXE link for preset $REHEARSAL_PRESET: $output"
+    return 1
+  }
+  pxe="$(grep -oE 'https://[^ ]+/pxe/[0-9a-f]+/v[0-9.]+/metal-amd64$' <<<"$output")" || {
+    fail "omnictl printed no PXE link for preset $REHEARSAL_PRESET: $output"
+    return 1
+  }
+  printf '%s/image/%s/%s/metal-amd64.iso\n' "$factory" "$(cut -d/ -f5 <<<"$pxe")" "$(cut -d/ -f6 <<<"$pxe")"
+}
+
+rehearsal_image() {
+  local isos url response
+  isos="$(pve_storage_isos "$SEAT_ISO_STORAGE")" || exit 1
+  [[ -z "$isos" ]] || die "$SEAT_ISO_STORAGE already holds $(paste -sd' ' <<<"$isos"), run ./lab seat $SEAT reset first"
+  url="$(rehearsal_image_url)" || rehearsal_capture_failure "could not build the install image link for $SEAT_NAME"
+  log "$SEAT_PVE_USER asks Proxmox to download the install image from ${url%%/image/*}"
+  response="$(host_pve_session_api POST "/nodes/$PVE_NODE/storage/$SEAT_ISO_STORAGE/download-url" \
+    --data-urlencode content=iso \
+    --data-urlencode "filename=$SEAT_ISO" \
+    --data-urlencode "url=$url")" || rehearsal_capture_failure "$SEAT_PVE_USER could not start the install image download"
+  pve_wait_response "$response" "$REHEARSAL_DOWNLOAD_TIMEOUT" host_pve_session_api ||
+    rehearsal_capture_failure "the install image download into $SEAT_ISO_STORAGE did not finish"
+  log "install image downloaded into $SEAT_ISO_STORAGE as $SEAT_ISO"
+}
+
+rehearsal_template() {
+  local response
+  response="$(host_pve_session_api POST "/nodes/$PVE_NODE/qemu" \
+    --data-urlencode "vmid=$SEAT_TEMPLATE_ID" \
+    --data-urlencode "name=$SEAT_TEMPLATE_NAME" \
+    --data-urlencode "pool=$SEAT_NAME" \
+    --data-urlencode "ide2=$SEAT_ISO_STORAGE:iso/$SEAT_ISO,media=cdrom" \
+    --data-urlencode ostype=l26 \
+    --data-urlencode scsihw=virtio-scsi-pci \
+    --data-urlencode agent=1 \
+    --data-urlencode "scsi0=$PVE_DISK_STORAGE:$SEAT_VM_DISK_GIB" \
+    --data-urlencode sockets=1 \
+    --data-urlencode "cores=$SEAT_VM_CORES" \
+    --data-urlencode "cpu=$REHEARSAL_CPU_TYPE" \
+    --data-urlencode "memory=$SEAT_VM_MEMORY_MIB" \
+    --data-urlencode balloon=0 \
+    --data-urlencode "net0=virtio,bridge=$SEAT_VNET,firewall=1")" ||
+    rehearsal_capture_failure "$SEAT_PVE_USER could not create $SEAT_TEMPLATE_NAME"
+  pve_wait_response "$response" 300 host_pve_session_api || rehearsal_capture_failure "creating $SEAT_TEMPLATE_NAME did not finish"
+  response="$(host_pve_session_api POST "/nodes/$PVE_NODE/qemu/$SEAT_TEMPLATE_ID/template")" ||
+    rehearsal_capture_failure "$SEAT_PVE_USER could not convert $SEAT_TEMPLATE_NAME to a template"
+  pve_wait_response "$response" 300 host_pve_session_api || rehearsal_capture_failure "converting $SEAT_TEMPLATE_NAME did not finish"
+  log "$SEAT_PVE_USER created $SEAT_TEMPLATE_NAME ($SEAT_TEMPLATE_ID) in pool $SEAT_NAME and converted it to a template"
+}
+
 rehearsal_clone_vm() {
   local index="$1" response
   response="$(host_pve_session_api POST "/nodes/$PVE_NODE/qemu/$SEAT_TEMPLATE_ID/clone" \
@@ -66,12 +135,15 @@ rehearsal_clone_vm() {
 
 rehearsal_machines() {
   local index state
-  [[ "$(pve_vm_state "$SEAT_TEMPLATE_ID" "$SEAT_TEMPLATE_NAME")" == stopped ]] || die "$SEAT_TEMPLATE_NAME is missing, run ./lab seats create first"
+  state="$(pve_vm_state "$SEAT_TEMPLATE_ID" "$SEAT_TEMPLATE_NAME")" || exit 1
+  [[ "$state" == absent ]] || die "$SEAT_TEMPLATE_NAME already exists and is $state, run ./lab seat $SEAT reset first"
   for index in "${!SEAT_VM_IDS[@]}"; do
     state="$(pve_vm_state "${SEAT_VM_IDS[index]}" "${SEAT_VM_NAMES[index]}")" || exit 1
     [[ "$state" == absent ]] || die "${SEAT_VM_NAMES[index]} already exists and is $state, run ./lab seat $SEAT reset first"
   done
   host_pve_login "$SEAT_USER" || exit 1
+  rehearsal_image
+  rehearsal_template
   for index in "${!SEAT_VM_IDS[@]}"; do
     rehearsal_clone_vm "$index" || exit 1
     log "$SEAT_PVE_USER cloned $SEAT_TEMPLATE_NAME into ${SEAT_VM_NAMES[index]} (${SEAT_VM_IDS[index]}) in pool $SEAT_NAME"
@@ -203,7 +275,7 @@ rehearsal_cluster_names() {
 }
 
 seat_reset() {
-  local clusters cluster deadline raw ids id vms vmid name template
+  local clusters cluster deadline raw ids id volid leftovers
   rehearsal_load "$1"
   clusters="$(rehearsal_cluster_names)" || exit 1
   for cluster in $clusters; do
@@ -216,12 +288,14 @@ seat_reset() {
     ((SECONDS < deadline)) || rehearsal_capture_failure "clusters still exist after ${REHEARSAL_DELETE_TIMEOUT}s: $(rehearsal_cluster_names | paste -sd' ')"
     sleep 5
   done
-  vms="$(seat_pool_vms)" || exit 1
-  while IFS=$'\t' read -r vmid name; do
-    [[ -n "$vmid" && "$vmid" != "$SEAT_TEMPLATE_ID" ]] || continue
-    pve_delete_vm "$vmid" "$name" || exit 1
-    log "VM $name ($vmid) removed"
-  done <<<"$vms"
+  seat_delete_pool_vms
+  leftovers="$(pve_storage_isos "$SEAT_ISO_STORAGE")" || exit 1
+  while IFS= read -r volid; do
+    [[ -n "$volid" ]] || continue
+    pve_delete_volume "$volid" || exit 1
+    log "install image $volid removed"
+  done <<<"$leftovers"
+  seat_omnictl delete installationmediaconfigs --all >/dev/null || exit 1
   raw="$(seat_omnictl get links -o json)" || exit 1
   ids="$(jq -s -r '.[].metadata.id' <<<"$raw")"
   for id in $ids; do
@@ -232,8 +306,11 @@ seat_reset() {
   [[ -z "$(rehearsal_cluster_names)" ]] || die "clusters remain after reset"
   raw="$(seat_omnictl get links -o json)" || exit 1
   [[ "$(jq -s 'length' <<<"$raw")" == 0 ]] || die "machines remain in the $SEAT_NAME Omni after reset"
-  template="$(pve_vm_state "$SEAT_TEMPLATE_ID" "$SEAT_TEMPLATE_NAME")" || exit 1
-  [[ "$template" == stopped ]] || die "$SEAT_TEMPLATE_NAME is $template after reset"
-  [[ "$(seat_pool_vms | grep -c . || true)" == 1 ]] || die "pool $SEAT_NAME still holds VMs besides the template: $(seat_pool_vms | cut -f2 | paste -sd' ')"
-  log "$SEAT_NAME reset: clusters, machines and VMs removed, the template, Omni, workspace, logins and tunnel kept"
+  leftovers="$(seat_pool_vms)" || exit 1
+  [[ -z "$leftovers" ]] || die "pool $SEAT_NAME still holds VMs after reset: $(cut -f2 <<<"$leftovers" | paste -sd' ')"
+  leftovers="$(pve_storage_isos "$SEAT_ISO_STORAGE")" || exit 1
+  [[ -z "$leftovers" ]] || die "$SEAT_ISO_STORAGE still holds images after reset: $(paste -sd' ' <<<"$leftovers")"
+  raw="$(seat_omnictl get installationmediaconfigs -o json)" || exit 1
+  [[ "$(jq -s 'length' <<<"$raw")" == 0 ]] || die "installation media presets remain in the $SEAT_NAME Omni after reset"
+  log "$SEAT_NAME reset: clusters, machines, VMs, templates, install images and media presets removed, the Omni, workspace, logins and tunnel kept"
 }

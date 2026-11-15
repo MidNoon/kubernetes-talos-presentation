@@ -354,7 +354,6 @@ proxmox_bootstrap_api() {
     printf 'PVE_TOKEN_ID=%q\n' "$PROXMOX_API_USER!$PROXMOX_API_TOKEN"
     printf 'PVE_TOKEN_SECRET=%q\n' "$secret"
     printf 'PVE_TLS_PIN=%q\n' "$pin"
-    printf 'PVE_ISO_STORAGE=%q\n' local
     printf 'PVE_DISK_STORAGE=%q\n' local-lvm
     printf 'PVE_SSH=%q\n' "root@$PROXMOX_ADDRESS"
     printf 'PVE_SSH_KEY=%q\n' "$PROXMOX_SSH_DIR/id_ed25519"
@@ -391,8 +390,6 @@ proxmox_verify() {
   proxmox_root_session "$PVE_TLS_PIN"
 
   storage="$(proxmox_root_api GET "/nodes/$PVE_NODE/storage")"
-  jq -e --arg s "$PVE_ISO_STORAGE" '.data | any(.storage == $s and (.content | split(",") | index("iso")))' <<<"$storage" >/dev/null ||
-    die "storage $PVE_ISO_STORAGE cannot hold ISOs: $storage"
   jq -e --arg s "$PVE_DISK_STORAGE" '.data | any(.storage == $s and (.content | split(",") | index("images")))' <<<"$storage" >/dev/null ||
     die "storage $PVE_DISK_STORAGE cannot hold VM disks: $storage"
 

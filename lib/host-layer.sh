@@ -10,6 +10,11 @@ readonly HOST_KUBECTL_SHA256=c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd
 readonly HOST_CODE_SERVER_VERSION=4.145.2
 readonly HOST_CODE_SERVER_SHA256=2f6db6c3e8b733dd6b3aeee83532e148b2bae2e392353ba85452d03572348962
 readonly HOST_PVE_REALM=lab
+readonly HOST_MEDIA_ROLE=TalosLabMedia
+readonly HOST_MEDIA_PRIVILEGES=Datastore.Audit,Datastore.AllocateTemplate
+readonly HOST_DOWNLOAD_ROLE=TalosLabDownload
+readonly HOST_DOWNLOAD_PRIVILEGES=Sys.AccessNetwork
+readonly HOST_ISO_ROOT=/var/lib/talos-lab/iso
 readonly HOST_DEX_PORT=5556
 readonly HOST_TUNNEL_NAME=talos-lab-host
 readonly HOST_REMOTE_BIN=/usr/local/lib/talos-lab
@@ -288,6 +293,23 @@ EOF
   log "Proxmox realm $HOST_PVE_REALM signs in through Dex, instructor@$HOST_PVE_REALM can see and power every VM"
 }
 
+host_ensure_roles() {
+  pve_remote MEDIA_ROLE="$HOST_MEDIA_ROLE" MEDIA_PRIVILEGES="$HOST_MEDIA_PRIVILEGES" \
+    DOWNLOAD_ROLE="$HOST_DOWNLOAD_ROLE" DOWNLOAD_PRIVILEGES="$HOST_DOWNLOAD_PRIVILEGES" ISO_ROOT="$HOST_ISO_ROOT" <<'EOF'
+set -euo pipefail
+roles="$(pveum role list --output-format json)"
+for pair in "$MEDIA_ROLE=$MEDIA_PRIVILEGES" "$DOWNLOAD_ROLE=$DOWNLOAD_PRIVILEGES"; do
+  if grep -q "\"roleid\":\"${pair%%=*}\"" <<<"$roles"; then
+    pveum role modify "${pair%%=*}" --privs "${pair#*=}"
+  else
+    pveum role add "${pair%%=*}" --privs "${pair#*=}"
+  fi
+done
+install -d -m 700 "$ISO_ROOT"
+EOF
+  log "Proxmox roles $HOST_MEDIA_ROLE ($HOST_MEDIA_PRIVILEGES) and $HOST_DOWNLOAD_ROLE ($HOST_DOWNLOAD_PRIVILEGES) ready"
+}
+
 host_query_param() {
   local url="$1" name="$2" pair
   while IFS= read -r -d '&' pair; do
@@ -405,14 +427,26 @@ host_workspace_login() {
   return "$status"
 }
 
+host_seat_iso_storage() {
+  printf 'seat%s-iso' "$1"
+}
+
 host_verify_seat_logins() {
-  local number="$1" pools
+  local number="$1" iso pools storages wanted permissions
+  iso="$(host_seat_iso_storage "$number")"
   host_workspace_login "student$number" "$(host_name "shell$number")" || host_capture_failure "student$number cannot sign in to the workspace"
   host_omni_login "student$number" "$(host_name "omni$number")" || host_capture_failure "student$number cannot sign in to Omni"
   host_pve_login "student$number" || host_capture_failure "student$number cannot sign in to Proxmox"
   pools="$(host_pve_session_api GET /pools | jq -c '[.data[].poolid]')" || host_capture_failure "student$number cannot list Proxmox pools"
   [[ "$pools" == "[\"seat$number\"]" ]] || host_capture_failure "student$number sees the Proxmox pools $pools, expected only seat$number"
-  log "student$number signs in to shell$number, omni$number and Proxmox, where only pool seat$number is visible"
+  storages="$(host_pve_session_api GET /storage | jq -c '[.data[].storage] | sort')" || host_capture_failure "student$number cannot list Proxmox storage"
+  wanted="$(jq -cn --arg a "$PVE_DISK_STORAGE" --arg b "$iso" '[$a, $b] | sort')"
+  [[ "$storages" == "$wanted" ]] || host_capture_failure "student$number sees the Proxmox storage $storages, expected $wanted"
+  permissions="$(host_pve_session_api GET /access/permissions)" || host_capture_failure "student$number cannot read their Proxmox permissions"
+  jq -e --arg node "/nodes/$PVE_NODE" --arg iso "/storage/$iso" \
+    '.data[$node]["Sys.AccessNetwork"] == 1 and .data[$iso]["Datastore.AllocateTemplate"] == 1' <<<"$permissions" >/dev/null ||
+    host_capture_failure "student$number cannot download ISOs into $iso: $(jq -c --arg node "/nodes/$PVE_NODE" --arg iso "/storage/$iso" '{node: .data[$node], iso: .data[$iso]}' <<<"$permissions")"
+  log "student$number signs in to shell$number, omni$number and Proxmox, where only pool seat$number and storage $iso are visible and $iso accepts downloads"
 }
 
 host_install_dex() {
@@ -538,6 +572,7 @@ host_up() {
   host_install_services
   host_wait_local dex "http://127.0.0.1:$HOST_DEX_PORT/.well-known/openid-configuration"
   host_ensure_realm
+  host_ensure_roles
   host_verify
   after="$(cf_snapshot_others)" || exit 1
   [[ "$before" == "$after" ]] || die "other Cloudflare resources changed during host up. Before: $before. After: $after"
@@ -569,7 +604,7 @@ host_down() {
   [[ -z "$vnets" ]] || die "zone $HOST_SDN_ZONE still has vnets: $(paste -sd' ' <<<"$vnets"), run ./lab seats delete first"
   before="$(cf_snapshot_others)" || exit 1
   pve_remote SERVICES="${HOST_SERVICES[*]}" BIN="$HOST_REMOTE_BIN" ETC="$HOST_REMOTE_ETC" ZONE="$HOST_SDN_ZONE" \
-    REALM="$HOST_PVE_REALM" <<'EOF'
+    REALM="$HOST_PVE_REALM" ROLES="$HOST_MEDIA_ROLE $HOST_DOWNLOAD_ROLE" ISO_ROOT="$HOST_ISO_ROOT" <<'EOF'
 set -euo pipefail
 if pveum user list --output-format json | grep -q "\"userid\":\"instructor@$REALM\""; then
   pveum user delete "instructor@$REALM"
@@ -577,6 +612,12 @@ fi
 if pveum realm list --output-format json | grep -q "\"realm\":\"$REALM\""; then
   pveum realm delete "$REALM"
 fi
+for role in $ROLES; do
+  if pveum role list --output-format json | grep -q "\"roleid\":\"$role\""; then
+    pveum role delete "$role"
+  fi
+done
+rmdir "$ISO_ROOT" 2>/dev/null || true
 for service in $SERVICES; do
   systemctl disable --now "$service" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$service.service"
@@ -601,6 +642,8 @@ EOF
   pve_ssh "systemctl list-unit-files 'talos-lab-*' --no-legend | grep -q ." && leftovers+=("talos-lab systemd units")
   pve_ssh "pvesh get /cluster/sdn/zones/$HOST_SDN_ZONE" >/dev/null 2>&1 && leftovers+=("SDN zone $HOST_SDN_ZONE")
   pve_ssh "pveum realm list --output-format json" | grep -q "\"realm\":\"$HOST_PVE_REALM\"" && leftovers+=("Proxmox realm $HOST_PVE_REALM")
+  pve_ssh "pveum role list --output-format json" | grep -qE "\"roleid\":\"($HOST_MEDIA_ROLE|$HOST_DOWNLOAD_ROLE)\"" && leftovers+=("Proxmox lab roles")
+  pve_ssh "test -e $HOST_ISO_ROOT" && leftovers+=("$HOST_ISO_ROOT")
   [[ -z "$(cf_owned_tunnels)" ]] || leftovers+=("tunnels $(cf_owned_tunnels | paste -sd' ')")
   [[ -z "$(cf_owned_hostnames)" ]] || leftovers+=("DNS records $(cf_owned_hostnames | paste -sd' ')")
   ((${#leftovers[@]} == 0)) || die "host teardown left resources behind: ${leftovers[*]}"

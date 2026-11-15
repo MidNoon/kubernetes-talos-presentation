@@ -218,7 +218,8 @@ test_seat_use_derives_isolated_identities() {
   [[ "${SEAT_MACHINE_IDS[0]}" == 1ab51de0-7a10-4000-8000-000000007001 ]] || return 1
   [[ "$SEAT_OMNI_HOST" == omni07.zone.example && "$SEAT_KUBE_HOST" == kube07.zone.example && "$SEAT_SITE_HOST" == team07.zone.example ]] || return 1
   [[ "$SEAT_WS_ID" == 9074 && "$SEAT_WS_NAME" == workspace07 && "$SEAT_WS_ADDR" == 10.88.7.3 ]] || return 1
-  [[ "$SEAT_TEMPLATE_ID" == 9079 && "$SEAT_TEMPLATE_NAME" == seat07-template && "$SEAT_PVE_USER" == student07@lab && "$SEAT_SHELL_HOST" == shell07.zone.example ]]
+  [[ "$SEAT_TEMPLATE_ID" == 9079 && "$SEAT_TEMPLATE_NAME" == seat07-template && "$SEAT_PVE_USER" == student07@lab && "$SEAT_SHELL_HOST" == shell07.zone.example ]] || return 1
+  [[ "$SEAT_ISO_STORAGE" == seat07-iso && "$SEAT_ISO_PATH" == /var/lib/talos-lab/iso/seat07 ]]
 }
 test_seat_numbers_with_leading_zeros_are_decimal() {
   seat_use 08
@@ -228,7 +229,7 @@ test_seat_identities_never_overlap() {
   local n all=()
   for n in $(seq 1 "$SEAT_MAX"); do
     seat_use "$n"
-    all+=("$SEAT_CT_ID" "$SEAT_WS_ID" "$SEAT_TEMPLATE_ID" "${SEAT_VM_IDS[@]}" "${SEAT_MACHINE_IDS[@]}" "$SEAT_SUBNET" "$SEAT_WS_ADDR")
+    all+=("$SEAT_CT_ID" "$SEAT_WS_ID" "$SEAT_TEMPLATE_ID" "${SEAT_VM_IDS[@]}" "${SEAT_MACHINE_IDS[@]}" "$SEAT_SUBNET" "$SEAT_WS_ADDR" "$SEAT_ISO_STORAGE" "$SEAT_ISO_PATH")
   done
   [[ "$(printf '%s\n' "${all[@]}" | sort | uniq -d)" == "" ]]
 }
