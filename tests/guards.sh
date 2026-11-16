@@ -377,6 +377,28 @@ test_guide_reads_concatenated_omni_json() {
     process.exit(objects.length === 2 && objects[1].metadata.id === "b" ? 0 : 1);
   ' "$LAB_ROOT/workspace/lab-guide/status.js"
 }
+test_guide_names_a_machine_that_rejects_its_configuration() {
+  local bin="$WORK/omni-bin" text
+  mkdir -p "$bin"
+  cat >"$bin/omnictl" <<'EOF'
+#!/usr/bin/env bash
+case "$2" in
+  clusterstatus) printf '{"metadata":{"id":"seat02"},"spec":{"ready":false,"machines":{"total":3,"healthy":1}}}\n' ;;
+  clustermachinestatuses)
+    printf '{"metadata":{"id":"aaaaaaaa-1111","labels":{"omni.sidero.dev/cluster":"seat02"}},"spec":{"lastconfigerror":"2 errors occurred:\\n\\t* KubeControllerManagerConfig: kube-controller-manager image cannot be empty\\n\\t* the following document kinds are only allowed on control plane machines: [KubeControllerManagerConfig]\\n\\n"}}\n'
+    printf '{"metadata":{"id":"bbbbbbbb-2222","labels":{"omni.sidero.dev/cluster":"seat02"}},"spec":{"lastconfigerror":"bad patch"}}\n'
+    printf '{"metadata":{"id":"cccccccc-3333","labels":{"omni.sidero.dev/cluster":"seat02"}},"spec":{"lastconfigerror":""}}\n'
+    printf '{"metadata":{"id":"dddddddd-4444","labels":{"omni.sidero.dev/cluster":"other"}},"spec":{"lastconfigerror":"elsewhere"}}\n'
+    ;;
+  machinelabels) printf '{"metadata":{"id":"aaaaaaaa-1111","labels":{"talos-worker-a":null}}}\n{"metadata":{"id":"bbbbbbbb-2222","labels":{"omni.sidero.dev/x":"y"}}}\n' ;;
+  *) exit 64 ;;
+esac
+EOF
+  chmod +x "$bin/omnictl"
+  text="$(PATH="$bin:$PATH" node -e 'require(process.argv[1]).CHECKS.cluster().then((r) => console.log(JSON.stringify(r)))' "$LAB_ROOT/workspace/lab-guide/status.js")" || return 1
+  [[ "$(jq -r .done <<<"$text")" == false ]] || return 1
+  [[ "$(jq -r .text <<<"$text")" == "Cluster seat02: 1 of 3 machines healthy, not ready yet. talos-worker-a rejected its configuration: KubeControllerManagerConfig: kube-controller-manager image cannot be empty; the following document kinds are only allowed on control plane machines: [KubeControllerManagerConfig]. bbbbbbbb rejected its configuration: bad patch" ]]
+}
 test_guide_extension_packs_reproducibly() {
   local first listing
   seat_build_guide || return 1

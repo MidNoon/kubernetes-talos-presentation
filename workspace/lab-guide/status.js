@@ -69,6 +69,32 @@ async function readyPodNodes(namespace, selector) {
   return { ready: ready.length, nodes: new Set(ready.map((p) => p.spec.nodeName)).size };
 }
 
+function configErrors(text) {
+  return text
+    .split('\n')
+    .map((line) => line.replace(/^\s*\*\s*/, '').trim())
+    .filter((line) => line && !/^\d+ errors? occurred:?$/.test(line))
+    .join('; ');
+}
+
+async function machineConfigErrors(cluster) {
+  const [statuses, labels] = await Promise.all([
+    run('omnictl', ['get', 'clustermachinestatuses', '-o', 'json']),
+    run('omnictl', ['get', 'machinelabels', '-o', 'json']),
+  ]);
+  if (!statuses.ok) return [];
+  const names = {};
+  if (labels.ok) {
+    for (const item of splitJson(labels.stdout)) {
+      const name = Object.keys(item.metadata.labels || {}).find((key) => !key.startsWith('omni.sidero.dev/'));
+      if (name) names[item.metadata.id] = name;
+    }
+  }
+  return splitJson(statuses.stdout)
+    .filter((s) => (s.metadata.labels || {})['omni.sidero.dev/cluster'] === cluster && s.spec && s.spec.lastconfigerror)
+    .map((s) => `${names[s.metadata.id] || s.metadata.id.slice(0, 8)} rejected its configuration: ${configErrors(s.spec.lastconfigerror)}`);
+}
+
 function fetchStatus(url) {
   return new Promise((resolve) => {
     const request = https.get(url, { timeout: 10000 }, (response) => {
@@ -98,10 +124,11 @@ const CHECKS = {
     const healthy = machines.healthy || 0;
     const total = machines.total || 0;
     const ready = cluster.spec.ready === true;
-    return {
-      done: ready && total >= MACHINES && healthy === total,
-      text: `Cluster ${cluster.metadata.id}: ${healthy} of ${total} machines healthy, ${ready ? 'ready' : 'not ready yet'}`,
-    };
+    const done = ready && total >= MACHINES && healthy === total;
+    const summary = `Cluster ${cluster.metadata.id}: ${healthy} of ${total} machines healthy, ${ready ? 'ready' : 'not ready yet'}`;
+    if (done) return { done, text: summary };
+    const errors = await machineConfigErrors(cluster.metadata.id);
+    return { done, text: [summary, ...errors].join('. ') };
   },
 
   async nodes() {

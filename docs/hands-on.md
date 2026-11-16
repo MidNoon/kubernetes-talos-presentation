@@ -129,7 +129,7 @@ In Omni, go to **Clusters** and click **Create Cluster**. This page has several 
 
 **Talos Version and Kubernetes Version.** Keep Omni's choices, Talos **1.14.5** and Kubernetes **1.37.1**. Newer patch releases exist, and near the end of this session you upgrade a running cluster to them, which is how clusters stay current in production.
 
-**Config Patches.** A config patch changes the Talos configuration Omni generates. Click **Config Patches** and add this patch, which applies to every machine in the cluster:
+**Config Patches.** A config patch changes the Talos configuration Omni generates. Click **Config Patches**, paste this patch and click **Save**. It applies to every machine in the cluster. This editor holds one patch, so pasting another one here replaces it:
 
 ```yaml
 apiVersion: v1alpha1
@@ -157,7 +157,7 @@ Kubernetes normally gives a silent node 50 seconds before it treats the node as 
 
 Under **Available Machines**, Omni lists your three machines by ID, so first find out which is which. Each ID is the machine's hardware UUID. In Proxmox, open the **Console** of `talos-cp`, and the **UUID** at the top left of the Talos dashboard matches one of the IDs in Omni. **Options**, then **SMBIOS settings (type1)**, shows the same value. In that machine's row, click **new label**, type `talos-cp` and press Enter. Do the same for `talos-worker-a` and `talos-worker-b`. In real deployments, labels like these are how you track which machine is which.
 
-The decision to give up on a silent node belongs to the controller manager, which only the control plane runs. Click the gear in the `talos-cp` row and add this patch to that machine alone:
+The decision to give up on a silent node belongs to the controller manager, which only the control plane runs, so this patch goes on `talos-cp` alone. A worker given it rejects its whole configuration and never joins. Click the gear in the `talos-cp` row, not **Config Patches** above, paste this patch and click **Save**:
 
 ```yaml
 apiVersion: v1alpha1
@@ -174,6 +174,8 @@ Now give the machines their jobs:
 - Click **Create Cluster**.
 
 Allow about five minutes. Talos installs itself to each disk and reboots, then Kubernetes starts. The control plane runs Kubernetes itself, and the workers run your applications. One control plane is fine for learning, and production clusters use three so that losing one is not an emergency.
+
+If a machine rejects its configuration, this step's status names it and gives Omni's reason. **only allowed on control plane machines** means the controller manager patch reached the workers, usually because it replaced the kubelet patch in the cluster's **Config Patches**. In Omni, open your cluster's **Config Patches**, replace that patch with the kubelet patch, and put the controller manager patch on `talos-cp` alone. Start any worker that is stopped in Proxmox. The workers pick up the corrected configuration within a minute or two.
 
 ## Connect to the cluster
 
