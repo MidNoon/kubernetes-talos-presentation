@@ -73,6 +73,7 @@ The repository is intended to become public. Account IDs, the domain and the EUL
 - `host/` holds the downloaded binaries, the Dex client secrets for Omni and Proxmox, `users.tsv`, the host resolver in `host-dns`, and the host tunnel token.
 - `seats/seatNN/` holds the seat's Omni account ID and etcd key, and its Admin and workspace Operator service account keys. It also holds the site tunnel token, `sheet.txt` (the card to hand the student), and the rehearsal kubeconfig, cluster template and failover runs.
 - `guide/lab-guide.vsix`, the packed guide extension.
+- `site/ssh/` holds the key pair for a site's Proxmox host. Its public half goes to the site's IT staff for root's `authorized_keys`, and that host's `PVE_SSH_KEY` points at the private half.
 - `logs/` and `failures/`, which holds the context a failed run saved.
 
 `.lab/pve-target.env` is the interface between Proxmox and everything above it. `./lab proxmox up` writes it for the nested lab. For another Proxmox, write it by hand with these keys:
@@ -111,11 +112,12 @@ These guests are only started, stopped or deleted when their ID and name both ma
 - It adds the roles `TalosLabMedia` (`Datastore.Audit` and `Datastore.AllocateTemplate`) and `TalosLabDownload` (`Sys.AccessNetwork`), and the directory `/var/lib/talos-lab/iso` for the seats' install image storages.
 - It adds the Proxmox OpenID realm `lab` ("Lab login") as the default realm. That realm signs in through Dex and takes the username from the `name` claim. It also adds `instructor@lab`, who is PVEAuditor and PVEVMAdmin on `/` and so can see and power every seat's VMs.
 
-It runs two systemd services:
+It runs three systemd services:
 - `talos-lab-dex` serves OIDC on `127.0.0.1:5556` with static passwords from `users.tsv`. It has two clients: `omni`, with a redirect URI per seat, and `proxmox`, whose redirect URI is `https://pve.<zone>`.
 - `talos-lab-cloudflared` runs the `talos-lab-host` tunnel. That tunnel maps `auth` to Dex and `pve` to Proxmox on 8006. For each seat, it maps `omniNN` and `kubeNN` to the seat's Omni API and Kubernetes proxy, and `shellNN` to its workspace.
+- `talos-lab-isolation` loads the nftables table `ip talos_lab` from `/etc/talos-lab/isolation.nft` before guests start. Its forward chain passes traffic from `10.88.0.0/16` to the seat's own subnet, to the resolvers in `host-dns` on port 53, and to the internet. It drops it to every other seat and to `10.0.0.0/8`, `100.64.0.0/10`, `169.254.0.0/16`, `172.16.0.0/12` and `192.168.0.0/16`. Its input chain lets seats reach the host only for DHCP, ping, and replies to connections the host opened. Traffic from anywhere else is untouched.
 
-`host verify` signs in through the public hostnames with the passwords in `users.tsv`, the way a browser does. The instructor signs in to Proxmox. Each seat's student signs in to the workspace, Omni and Proxmox. In Proxmox they must see only their own pool, their disk storage and their own ISO storage, and must be allowed to download into the ISO storage. A rejected password fails the run with the login that rejected it.
+`host verify` signs in through the public hostnames with the passwords in `users.tsv`, the way a browser does. The instructor signs in to Proxmox. Each seat's student signs in to the workspace, Omni and Proxmox. In Proxmox they must see only their own pool, their disk storage and their own ISO storage, and must be allowed to download into the ISO storage. A rejected password fails the run with the login that rejected it. From each seat's workspace, it probes its own Omni, SSH on the gateway and on the host's main address, the Image Factory, and another seat's Omni when there is one, and resolves a name. Only the seat's own Omni, the Image Factory and the name may get through.
 
 **Seats.** Seat n gets:
 - the vnet `seatNN` on `10.88.n.0/24`, with gateway `.1` on the host, SNAT out, DHCP from `.100` to `.199`, and the host's resolver;
@@ -174,6 +176,7 @@ It runs two systemd services:
 - The Talos console dashboard shows the machine's UUID at the top left. It equals the VM's SMBIOS UUID and the machine ID in Omni, which is how students tell machines apart.
 - Omni upgrades Talos one machine at a time, control plane first. Talos cordons and drains each machine before it reboots, so its pods move first. The control plane's reboot leaves `kubectl` unanswered for about two minutes. The rehearsal's Talos upgrade took 5.5 minutes, and Kubernetes took 3.3 minutes without reboots. 3 of 452 probe requests failed across both.
 - Omni's Operator role cannot read identities. Checks made as the workspace's Operator service account list clusters instead.
+- `bridge-nf-call-iptables` is 0 on the host, so traffic within a seat's subnet is bridged and never reaches the `ip` forward hook. The isolation table still accepts each seat's own subnet, so turning bridge netfilter on does not cut a seat off from itself.
 - A Proxmox clone gets a new SMBIOS UUID and MAC address, so three clones of one template register as three distinct Talos machines.
 - A Talos control plane runs this lab's 3-node cluster in 3 GB, so all three VMs share the template's size.
 - code-server installs extensions only from a VSIX file or Open VSX. `seat_build_guide` zips `workspace/lab-guide/` into a VSIX with fixed timestamps, so an unchanged extension packs to the same checksum.

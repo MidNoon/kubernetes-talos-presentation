@@ -19,7 +19,9 @@ readonly HOST_DEX_PORT=5556
 readonly HOST_TUNNEL_NAME=talos-lab-host
 readonly HOST_REMOTE_BIN=/usr/local/lib/talos-lab
 readonly HOST_REMOTE_ETC=/etc/talos-lab
-readonly HOST_SERVICES=(talos-lab-dex talos-lab-cloudflared)
+readonly HOST_SERVICES=(talos-lab-dex talos-lab-cloudflared talos-lab-isolation)
+readonly HOST_SEAT_RANGE=10.88.0.0/16
+readonly HOST_BLOCKED_RANGES='10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16'
 readonly HOST_READY_TIMEOUT=300
 readonly HOST_CT_TEMPLATE_PATTERN='^debian-13-standard_[0-9.-]+_amd64\.tar\.zst$'
 
@@ -237,8 +239,9 @@ if ! pveam list local | awk '{print $1}' | sed 's|^local:vztmpl/||' | grep -qE "
   pveam download local "$template" >/dev/null
 fi
 EOF
-  dns="$(pve_ssh "awk '/^nameserver/ {print \$2; exit}' /etc/resolv.conf")"
-  [[ -n "$dns" ]] || die "the Proxmox host has no nameserver in /etc/resolv.conf"
+  dns="$(pve_ssh "awk '\$1 == \"nameserver\" && \$2 ~ /^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\$/ {print \$2; exit}' /etc/resolv.conf")"
+  [[ -n "$dns" ]] || die "the Proxmox host has no IPv4 nameserver in /etc/resolv.conf: $(pve_ssh "grep nameserver /etc/resolv.conf" | paste -sd' ')"
+  [[ "$dns" != 127.* ]] || die "the Proxmox host resolves through $dns, which seats cannot reach. Put an upstream IPv4 nameserver first in /etc/resolv.conf"
   printf '%s\n' "$dns" >"$HOST_STATE/host-dns"
   log "host prepared: dnsmasq, wireguard module, SDN zone $HOST_SDN_ZONE, Debian container template"
 }
@@ -455,11 +458,89 @@ host_install_dex() {
   host_wait_local dex "http://127.0.0.1:$HOST_DEX_PORT/.well-known/openid-configuration"
 }
 
+host_render_isolation() {
+  local number
+  printf 'table ip talos_lab\ndelete table ip talos_lab\n\ntable ip talos_lab {\n'
+  printf '  set resolvers {\n    type ipv4_addr\n    elements = { %s }\n  }\n\n' "$(<"$HOST_STATE/host-dns")"
+  printf '  set blocked {\n    type ipv4_addr\n    flags interval\n    elements = { %s }\n  }\n\n' "$HOST_BLOCKED_RANGES"
+  printf '  chain forward {\n    type filter hook forward priority filter - 10; policy accept;\n'
+  printf '    ip saddr != %s accept\n' "$HOST_SEAT_RANGE"
+  printf '    ip daddr @resolvers meta l4proto { tcp, udp } th dport 53 accept\n'
+  for ((number = 1; number <= SEAT_MAX; number++)); do
+    printf '    ip saddr %s ip daddr %s accept\n' "$(host_seat_subnet "$number")" "$(host_seat_subnet "$number")"
+  done
+  printf '    ip daddr @blocked drop\n  }\n\n'
+  printf '  chain input {\n    type filter hook input priority filter - 10; policy accept;\n'
+  printf '    ip saddr != %s accept\n' "$HOST_SEAT_RANGE"
+  printf '    ct state established,related accept\n    udp dport 67 accept\n    icmp type echo-request accept\n    drop\n  }\n}\n'
+}
+
+host_render_isolation_unit() {
+  cat <<EOF
+[Unit]
+Before=pve-guests.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f $HOST_REMOTE_ETC/isolation.nft
+ExecStop=/usr/sbin/nft delete table ip talos_lab
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+host_isolation_probe() {
+  local ct="$1"
+  shift
+  pve_ssh "pct exec $ct -- bash -s" <<EOF
+probe() {
+  if timeout 2 bash -c "exec 3<>/dev/tcp/\$2/\$3" 2>/dev/null; then
+    printf '%s open\n' "\$1"
+  else
+    printf '%s closed\n' "\$1"
+  fi
+}
+$(printf '%s\n' "$@" | awk '{printf "probe %s %s %s &\n", $1, $2, $3}')
+wait
+EOF
+}
+
+host_verify_isolation() {
+  local number="$1" seats="$2" ct address other result wanted
+  ct="$(seat_use "$number" && printf '%s' "$SEAT_WS_ID")"
+  address="$(pve_ssh "ip -4 -o route get 1.1.1.1" | grep -oE 'src [0-9.]+' | cut -d' ' -f2)" ||
+    host_capture_failure "the host's default route names no source address"
+  other="$(awk -v own="$number" '$0 != own {print; exit}' <<<"$seats")"
+  wanted="own-omni open
+gateway-ssh closed
+host-ssh closed
+internet open"
+  local probes=(
+    "own-omni $(host_seat_address "$number" 2) 8080"
+    "gateway-ssh $(host_seat_address "$number" 1) 22"
+    "host-ssh $address 22"
+    "internet factory.talos.dev 443"
+  )
+  if [[ -n "$other" ]]; then
+    probes+=("other-seat-omni $(host_seat_address "$other" 2) 8080")
+    wanted+=$'\n'"other-seat-omni closed"
+  fi
+  result="$(host_isolation_probe "$ct" "${probes[@]}" 2>&1 | sort)" || host_capture_failure "could not probe the network from seat $number's workspace: $result"
+  [[ "$result" == "$(sort <<<"$wanted")" ]] ||
+    host_capture_failure "seat $number's network isolation is wrong. Expected: $(sort <<<"$wanted" | paste -sd';'). Saw: $(paste -sd';' <<<"$result")"
+  pve_ssh "pct exec $ct -- getent hosts factory.talos.dev" >/dev/null || host_capture_failure "seat $number's workspace cannot resolve names through $(<"$HOST_STATE/host-dns")"
+  log "seat $number reaches its own Omni, names and the internet, and not the host$([[ -n "$other" ]] && printf ' or seat %s' "$other")"
+}
+
 host_install_services() {
   printf 'TUNNEL_TOKEN=%s\n' "$(<"$HOST_STATE/connector-token")" | host_install_file 600 "$HOST_REMOTE_ETC/cloudflared.env"
   host_render_dex | host_install_file 600 "$HOST_REMOTE_ETC/dex.json"
   host_render_dex_unit | host_install_file 644 /etc/systemd/system/talos-lab-dex.service
   host_render_cloudflared_unit | host_install_file 644 /etc/systemd/system/talos-lab-cloudflared.service
+  host_render_isolation | host_install_file 600 "$HOST_REMOTE_ETC/isolation.nft"
+  host_render_isolation_unit | host_install_file 644 /etc/systemd/system/talos-lab-isolation.service
   pve_ssh "systemctl daemon-reload && systemctl enable --quiet ${HOST_SERVICES[*]} && systemctl restart ${HOST_SERVICES[*]}"
 }
 
@@ -504,6 +585,10 @@ host_wait_public() {
 
 host_seat_address() {
   printf '10.88.%d.%d' "$((10#$1))" "$2"
+}
+
+host_seat_subnet() {
+  printf '10.88.%d.0/24' "$((10#$1))"
 }
 
 host_wanted_hostnames() {
@@ -579,7 +664,7 @@ host_up() {
 }
 
 host_verify() {
-  local service number
+  local service number seats
   for service in "${HOST_SERVICES[@]}"; do
     pve_ssh "systemctl is-active --quiet $service" || host_capture_failure "$service is not active"
   done
@@ -587,10 +672,12 @@ host_verify() {
   host_wait_public proxmox "https://$(host_name pve)/"
   host_pve_login instructor || host_capture_failure "instructor cannot sign in to Proxmox"
   log "instructor signs in to Proxmox through Dex"
-  for number in $(host_seat_numbers); do
+  seats="$(host_seat_numbers)"
+  for number in $seats; do
     host_wait_public "omni for seat $number" "https://$(host_name "omni$number")/"
     host_wait_public "workspace for seat $number" "https://$(host_name "shell$number")/healthz"
     host_verify_seat_logins "$number"
+    host_verify_isolation "$number" "$seats"
   done
   log "host verified: logins at https://$(host_name auth), Proxmox at https://$(host_name pve), $(host_seat_numbers | grep -c . || true) seats"
 }

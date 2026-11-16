@@ -437,6 +437,50 @@ test_upgrade_reports_an_unreadable_cluster() {
   [[ "$(upgrade_node_states)" == unreadable ]]
 }
 
+test_isolation_keeps_each_seat_to_itself() {
+  local rules line_of
+  printf '192.0.2.53\n' >"$HOST_STATE/host-dns"
+  rules="$(host_render_isolation)"
+  line_of() { grep -nF -- "$1" <<<"$rules" | head -1 | cut -d: -f1; }
+  grep -qF 'elements = { 192.0.2.53 }' <<<"$rules" || return 1
+  [[ "$(grep -cE 'ip saddr 10\.88\.[0-9]+\.0/24 ip daddr 10\.88\.[0-9]+\.0/24 accept' <<<"$rules")" == "$SEAT_MAX" ]] || return 1
+  grep -qF 'ip saddr 10.88.7.0/24 ip daddr 10.88.7.0/24 accept' <<<"$rules" || return 1
+  grep -qF '10.0.0.0/8' <<<"$rules" && grep -qF '169.254.0.0/16' <<<"$rules" && grep -qF '192.168.0.0/16' <<<"$rules" || return 1
+  (($(line_of '@resolvers meta l4proto') < $(line_of 'ip daddr @blocked drop'))) || return 1
+  (($(line_of 'ip saddr 10.88.20.0/24 ip daddr 10.88.20.0/24 accept') < $(line_of 'ip daddr @blocked drop'))) || return 1
+  (($(line_of 'udp dport 67 accept') < $(line_of '    drop'))) || return 1
+  [[ "$(grep -cF 'ip saddr != 10.88.0.0/16 accept' <<<"$rules")" == 2 ]]
+}
+
+lab_strict() {
+  LAB_ROOT="$LAB_ROOT" WORK="$WORK" bash -euo pipefail -c "$(declare -f load_libs)"$'\nload_libs\n'"$1"
+}
+
+test_isolation_check_runs_with_one_seat_and_with_two() {
+  printf '192.0.2.53\n' >"$HOST_STATE/host-dns"
+  lab_strict "$(
+    cat <<'EOF'
+pve_ssh() {
+  case "$1" in
+    "ip -4 -o route get"*) printf '1.1.1.1 via 192.0.2.1 dev vmbr0 src 192.0.2.10 uid 0\n' ;;
+    "pct exec"*"bash -s")
+      printf '%s\n' "$1" >>"$FAKE/probed"
+      awk '/^probe / {print $2, ($2 == "own-omni" || $2 == "internet") ? "open" : "closed"}'
+      ;;
+    "pct exec"*"getent hosts"*) printf '203.0.113.7 factory.talos.dev\n' ;;
+    *) return 64 ;;
+  esac
+}
+host_verify_isolation 01 01 2>"$FAKE/one"
+host_verify_isolation 01 $'01\n02' 2>"$FAKE/two"
+EOF
+  )" || return 1
+  grep -qF 'not the host' "$FAKE/one" || return 1
+  ! grep -qF 'or seat' "$FAKE/one" || return 1
+  grep -qF 'not the host or seat 02' "$FAKE/two" || return 1
+  [[ "$(cat "$FAKE/probed")" == $'pct exec 9014 -- bash -s\npct exec 9014 -- bash -s' ]]
+}
+
 passed=0
 failed=0
 for name in $(declare -F | awk '{print $3}' | grep '^test_'); do

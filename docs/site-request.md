@@ -97,7 +97,7 @@ After that, we do the rest: a network and virtualization check, the Proxmox inst
 - No inbound ports are open to the internet. The host makes only outbound connections.
 - Each student gets their own private network, cluster manager, Proxmox resource pool and storage. Omni and Proxmox show each student only their own.
 - Logins are issued by the lab for the session, one per seat. No university accounts or student personal data are used.
-- Students' VMs reach the internet through the host's address. We can block traffic between student networks, and from student networks to university-internal address ranges you name. Alternatively, the VM can sit on an isolated network segment.
+- Students' VMs reach the internet through the host's address. The host drops their traffic to other students' networks, to the host itself, and to every private, carrier-grade NAT and link-local range (`10.0.0.0/8`, `100.64.0.0/10`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`). Only DNS to the resolvers you give us is allowed. University ranges outside those, such as internal networks on public addresses, can be added to the blocked list, or the VM can sit on an isolated network segment.
 - Student websites appear under a domain we own, through Cloudflare.
 - Nothing is kept after the session. We remove every seat, tunnel and DNS record, and the VM can then be deleted.
 
@@ -110,7 +110,7 @@ After that, we do the rest: a network and virtualization check, the Proxmox inst
 - What RAM, vCPUs and SSD storage are available?
 - Is VPN access with SSH to the VM possible? If not, is the outbound management tunnel acceptable?
 - Are any outbound ports or destinations blocked, is there a proxy, and which DNS servers should the VM use?
-- Static address or DHCP? Is the VM on an isolated segment, or are there internal ranges to block?
+- Static address or DHCP? Is the VM on an isolated segment, or are there internal ranges on public addresses to block?
 - Who has console access on the first day?
 - Are there policies or forms for external services, such as Cloudflare and Sidero Labs' Image Factory?
 - Who is our contact in IT?
