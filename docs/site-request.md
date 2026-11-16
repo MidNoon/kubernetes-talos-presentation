@@ -80,7 +80,8 @@ We reach the VM through a Cloudflare Tunnel that carries only SSH, protected by 
 - The VM opens the tunnel outward on the ports the lab already uses, so it needs no inbound port and no VPN account.
 - Access lets a connection through only with our service token, and SSH on the VM accepts only our key.
 
-On the first day, someone with root on the VM runs one script we send beforehand, `bootstrap.sh`, as root. It:
+On the first day, someone with root on the VM runs our bootstrap script as root, either with one `curl` command we give them that fetches it once, or from our public repository with two values we hand over. It:
+- installs `curl` and the SSH server if they are missing;
 - adds our SSH public key to `root`;
 - installs a pinned `cloudflared` and runs it as the `talos-access` service;
 - prints the VM's SSH host key fingerprint.
@@ -108,6 +109,6 @@ If you prefer your VPN, VPN accounts for two people with TCP 22 and 8006 to the 
 - Is the outbound SSH tunnel through Cloudflare Access acceptable, or do you prefer VPN access?
 - Are any outbound ports or destinations blocked, is there a proxy, and which DNS servers should the VM use?
 - Static address or DHCP? Is the VM on an isolated segment, or are there internal ranges on public addresses to block?
-- Who can run our bootstrap script as root on the first day, and how do we get it to them?
+- Who can run our bootstrap script as root on the first day?
 - Are there policies or forms for external services, such as Cloudflare and Sidero Labs' Image Factory?
 - Who is our contact in IT?

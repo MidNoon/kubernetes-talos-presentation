@@ -554,19 +554,29 @@ test_access_snapshot_covers_everything_but_access_resources() {
   cf_lookup_access || return 1
   [[ "$CF_ACCESS_APP_ID" == access-app && "$CF_ACCESS_TOKEN_ID" == access-token ]]
 }
-test_access_bootstrap_installs_the_pinned_connector_and_key() {
-  local script
-  mkdir -p "$ACCESS_STATE/ssh"
-  printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPUBLICKEYFORTESTS talos-lab-site\n' >"$ACCESS_STATE/ssh/id_ed25519.pub"
+test_access_bootstrap_matches_the_lab_pins_and_paths() {
+  local script="$LAB_ROOT/tools/access-bootstrap.sh"
+  grep -qxF "CLOUDFLARED_VERSION=$HOST_CLOUDFLARED_VERSION" "$script" || return 1
+  grep -qxF "CLOUDFLARED_SHA256=$HOST_CLOUDFLARED_SHA256" "$script" || return 1
+  grep -qxF "UNIT=$ACCESS_REMOTE_UNIT" "$script" || return 1
+  grep -qxF "BIN=$ACCESS_REMOTE_BIN" "$script" || return 1
+  grep -qxF "ETC=$ACCESS_REMOTE_ETC" "$script"
+}
+test_access_bootstrap_carries_the_key_and_token_it_validates() {
+  local script key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPUBLICKEYFORTESTS talos-lab-site'
+  mkdir -p "$ACCESS_STATE/ssh" "$WORK/notroot"
+  printf '%s\n' "$key" >"$ACCESS_STATE/ssh/id_ed25519.pub"
   printf '%s' "$LONG_CONNECTOR_TOKEN" >"$ACCESS_STATE/connector-token"
   script="$(access_render_bootstrap)" || return 1
   bash -n <<<"$script" || return 1
-  grep -qF "releases/download/$HOST_CLOUDFLARED_VERSION/cloudflared-linux-amd64" <<<"$script" || return 1
-  grep -qF "$HOST_CLOUDFLARED_SHA256" <<<"$script" || return 1
-  grep -qF "grep -qxF 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPUBLICKEYFORTESTS talos-lab-site' /root/.ssh/authorized_keys" <<<"$script" || return 1
-  [[ "$(grep -cF "$LONG_CONNECTOR_TOKEN" <<<"$script")" == 1 ]] || return 1
-  grep -qF 'ExecStart=/usr/local/lib/talos-access/cloudflared tunnel --no-autoupdate run' <<<"$script" || return 1
-  ! grep -qE '\$(HOST|ACCESS)_' <<<"$script"
+  [[ "$(sed -n 2p <<<"$script")" == "set -- '$key' '$LONG_CONNECTOR_TOKEN'" ]] || return 1
+  [[ "$(tail -n +3 <<<"$script")" == "$(tail -n +2 "$LAB_ROOT/tools/access-bootstrap.sh")" ]] || return 1
+  printf '#!/bin/sh\necho 1000\n' >"$WORK/notroot/id"
+  chmod 755 "$WORK/notroot/id"
+  ! PATH="$WORK/notroot:$PATH" bash <<<"$script" 2>"$WORK/err" >/dev/null || return 1
+  [[ "$(cat "$WORK/err")" == "run this as root" ]] || return 1
+  ! bash "$LAB_ROOT/tools/access-bootstrap.sh" 'ssh-rsa AAAA' "$LONG_CONNECTOR_TOKEN" 2>"$WORK/err" || return 1
+  grep -qF 'not an ssh-ed25519 public key' "$WORK/err"
 }
 test_pve_ssh_goes_through_access_only_when_set() {
   PVE_SSH_KEY=key PVE_SSH_KNOWN_HOSTS=known

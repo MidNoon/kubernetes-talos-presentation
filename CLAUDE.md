@@ -14,6 +14,7 @@ Students build a Talos install image in their Omni, have Proxmox download it, ma
 
 ```bash
 ./lab access up|down                         # SSH to a site host through a Cloudflare Tunnel behind Access
+./lab access serve                           # hand the site host its bootstrap once, as a one-line curl command
 ./lab access verify [SHA256:...]             # record the site host's key on first contact, then check it
 ./lab access ssh [command...]                # a shell or a command on the site host, without the run lock
 ./lab proxmox up|verify|down                 # nested Proxmox VM on the local libvirt host
@@ -60,6 +61,7 @@ Running `seats create` again leaves running seats untouched, because a seat's Om
 - `workspace/lab-guide/` is the code-server extension behind the workspace's **Lab guide** tab. `extension.js` builds the panel from `~/README.md`, sends commands to the `Lab` terminal, copies values and opens links. `status.js` holds the status checks, and `node status.js` prints them all as JSON. A command with `--watch` or `-w` runs in its own `Watch` terminal beside `Lab`. A step stays ticked once its check passes, even if the check later fails, for example during the failover. `media/` holds the panel's script, styles and icon.
 - `docker/pve-assistant/` builds the image that prepares the unattended Proxmox installer.
 - `tools/site-check.sh` runs standalone on a Proxmox host or desktop at a candidate site, with no dependency on the rest of the repo.
+- `tools/access-bootstrap.sh` runs standalone as root on a site host with our SSH public key and the tunnel connector token as arguments. A guard test keeps its `cloudflared` pin and paths identical to the lab's.
 - `docs/site-request.md` is the hosting request to hand a site's IT staff: size per seat count, nested virtualization, outbound destinations, remote access options, security, and questions to settle.
 
 ## Configuration and state
@@ -116,7 +118,9 @@ The access layer may write only the tunnel `talos-lab-access`, the CNAME `ssh`, 
 - the tunnel `talos-lab-access`, whose only route is `ssh.<zone>` to `ssh://localhost:22`;
 - the service token `talos-lab-access`;
 - the self-hosted Access application `talos-lab-access` on `ssh.<zone>`, whose only policy is Service Auth for that token;
-- `.lab/access/bootstrap.sh`, which someone runs as root on the site host. It adds the access public key to root, installs openssh-server and curl when missing, downloads the pinned `cloudflared` and checks its SHA-256, runs it as `talos-access` from `/usr/local/lib/talos-access` with the connector token in `/etc/talos-access`, and prints the host's ed25519 key fingerprint.
+- `.lab/access/bootstrap.sh`, which is `tools/access-bootstrap.sh` with the access public key and connector token set. Run as root on the site host, it installs openssh-server and curl when missing, adds the key to root, downloads the pinned `cloudflared` and checks its SHA-256, runs it as `talos-access` from `/usr/local/lib/talos-access` with the connector token in `/etc/talos-access`, and prints the host's ed25519 key fingerprint. Its body is one function called on the last line, so `curl | bash` reads all of it before anything can read stdin.
+
+`./lab access serve` hands that file out once, so nobody types the token at a console. It serves it from this machine through a Cloudflare quick tunnel at a random `trycloudflare.com` address, under a random 16-hex-digit path, with an empty page at `/`. It prints `curl -fsSL <address>/<path> | bash` and stops after the first successful fetch or after an hour. A quick tunnel needs no Cloudflare account resources.
 
 `./lab access verify SHA256:...` connects through `cloudflared access ssh` with the service token and records the host key only if it matches that fingerprint. Later calls check it strictly. `./lab access down` has the host remove its connector, unit and our key 5 seconds later, then deletes the application, token, record and tunnel.
 

@@ -3,6 +3,7 @@ readonly ACCESS_REMOTE_BIN=/usr/local/lib/talos-access
 readonly ACCESS_REMOTE_ETC=/etc/talos-access
 readonly ACCESS_CONNECT_TIMEOUT=180
 readonly ACCESS_FINGERPRINT_PATTERN='^SHA256:[A-Za-z0-9+/]{43}$'
+readonly ACCESS_SERVE_TIMEOUT=3600
 
 ACCESS_STATE="$LAB_STATE/access"
 
@@ -88,54 +89,8 @@ access_ensure_app() {
 }
 
 access_render_bootstrap() {
-  local key token url
-  key="$(<"$(access_key).pub")"
-  token="$(<"$ACCESS_STATE/connector-token")"
-  url="https://github.com/cloudflare/cloudflared/releases/download/$HOST_CLOUDFLARED_VERSION/cloudflared-linux-amd64"
-  cat <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-[[ "\$(id -u)" == 0 ]] || { echo "run this as root" >&2; exit 1; }
-missing=()
-command -v curl >/dev/null || missing+=(curl ca-certificates)
-[[ -x /usr/sbin/sshd ]] || missing+=(openssh-server)
-if ((\${#missing[@]} > 0)); then
-  apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "\${missing[@]}"
-fi
-install -d -m 700 /root/.ssh
-touch /root/.ssh/authorized_keys
-chmod 600 /root/.ssh/authorized_keys
-grep -qxF '$key' /root/.ssh/authorized_keys || printf '%s\n' '$key' >>/root/.ssh/authorized_keys
-install -d -m 755 $ACCESS_REMOTE_BIN
-curl -fsSL -o $ACCESS_REMOTE_BIN/cloudflared.part $url
-printf '%s  %s\n' $HOST_CLOUDFLARED_SHA256 $ACCESS_REMOTE_BIN/cloudflared.part | sha256sum --check --quiet
-chmod 755 $ACCESS_REMOTE_BIN/cloudflared.part
-mv $ACCESS_REMOTE_BIN/cloudflared.part $ACCESS_REMOTE_BIN/cloudflared
-install -d -m 700 $ACCESS_REMOTE_ETC
-(umask 077 && printf 'TUNNEL_TOKEN=%s\n' '$token' >$ACCESS_REMOTE_ETC/tunnel.env)
-cat >/etc/systemd/system/$ACCESS_REMOTE_UNIT.service <<'UNIT'
-[Unit]
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-DynamicUser=yes
-EnvironmentFile=$ACCESS_REMOTE_ETC/tunnel.env
-ExecStart=$ACCESS_REMOTE_BIN/cloudflared tunnel --no-autoupdate run
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-systemctl daemon-reload
-systemctl enable --now $ACCESS_REMOTE_UNIT
-systemctl enable --now ssh
-sleep 5
-systemctl is-active --quiet $ACCESS_REMOTE_UNIT
-printf 'access ready, host key %s\n' "\$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print \$2}')"
-EOF
+  printf "#!/usr/bin/env bash\nset -- '%s' '%s'\n" "$(<"$(access_key).pub")" "$(<"$ACCESS_STATE/connector-token")"
+  tail -n +2 "$LAB_ROOT/tools/access-bootstrap.sh"
 }
 
 access_up() {
@@ -198,6 +153,52 @@ access_verify() {
   identity="$(pve_ssh 'printf "%s, %s, %s\n" "$(hostname)" "$(. /etc/os-release && printf %s "$PRETTY_NAME")" "$(pveversion 2>/dev/null || printf "no Proxmox VE")"')" ||
     die "could not run a command on $PVE_SSH through Cloudflare Access"
   log "reached $identity through $(cf_access_hostname) with Cloudflare Access"
+}
+
+access_serve_stop() {
+  kill "${ACCESS_SERVE_PIDS[@]}" 2>/dev/null || true
+  rm -f "$ACCESS_SERVE_DIR"/*
+  rmdir "$ACCESS_SERVE_DIR" 2>/dev/null || true
+}
+
+access_serve() {
+  local secret port url deadline log
+  access_load_config
+  [[ -s "$ACCESS_STATE/bootstrap.sh" ]] || die "no bootstrap at $ACCESS_STATE/bootstrap.sh, run ./lab access up first"
+  secret="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  ACCESS_SERVE_DIR="$(mktemp -d)"
+  ACCESS_SERVE_PIDS=()
+  log="$ACCESS_STATE/serve.log"
+  lab_on_exit access_serve_stop
+  install -m 600 "$ACCESS_STATE/bootstrap.sh" "$ACCESS_SERVE_DIR/$secret"
+  : >"$ACCESS_SERVE_DIR/index.html"
+  uv run python -u -m http.server 0 --bind 127.0.0.1 --directory "$ACCESS_SERVE_DIR" >"$log.http" 2>&1 &
+  ACCESS_SERVE_PIDS+=($!)
+  deadline=$((SECONDS + 30))
+  until port="$(grep -oE 'port [0-9]+' "$log.http" | head -1 | cut -d' ' -f2)" && [[ -n "$port" ]]; do
+    ((SECONDS < deadline)) || die "the local file server did not start: $(cat "$log.http")"
+    sleep 1
+  done
+  "$HOST_STATE/bin/cloudflared" tunnel --no-autoupdate --url "http://127.0.0.1:$port" >"$log" 2>&1 &
+  ACCESS_SERVE_PIDS+=($!)
+  deadline=$((SECONDS + 60))
+  until url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$log" | head -1)" && [[ -n "$url" ]]; do
+    ((SECONDS < deadline)) || die "Cloudflare gave no quick tunnel address within 60s: $(tail -5 "$log")"
+    sleep 1
+  done
+  deadline=$((SECONDS + 120))
+  until [[ "$(lab_public_curl --silent --max-time 10 --output /dev/null --write-out '%{http_code}' "$url/" 2>/dev/null)" == 200 ]]; do
+    ((SECONDS < deadline)) || die "$url did not answer within 120s: $(tail -5 "$log")"
+    sleep 3
+  done
+  log "bootstrap served once for up to $((ACCESS_SERVE_TIMEOUT / 60)) minutes. On the site host, as root, run:"
+  printf '\n  curl -fsSL %s/%s | bash\n\n' "$url" "$secret"
+  deadline=$((SECONDS + ACCESS_SERVE_TIMEOUT))
+  until grep -qE "\"GET /$secret HTTP/[0-9.]+\" 200" "$log.http"; do
+    ((SECONDS < deadline)) || die "nobody fetched the bootstrap within $((ACCESS_SERVE_TIMEOUT / 60)) minutes"
+    sleep 2
+  done
+  log "bootstrap fetched, the address is closed. Run ./lab access verify with the host key the site host printed"
 }
 
 access_ssh() {
