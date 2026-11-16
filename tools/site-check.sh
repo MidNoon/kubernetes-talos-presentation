@@ -4,10 +4,13 @@ set -uo pipefail
 TARGETS=(
   1.1.1.1:443
   factory.talos.dev:443
+  discovery.talos.dev:443
   ghcr.io:443
   registry.k8s.io:443
   registry-1.docker.io:443
   api.cloudflare.com:443
+  download.proxmox.com:80
+  deb.debian.org:80
   region1.v2.argotunnel.com:7844
   region2.v2.argotunnel.com:7844
 )

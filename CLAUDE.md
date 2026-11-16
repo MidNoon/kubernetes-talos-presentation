@@ -56,6 +56,7 @@ Running `seats create` again leaves running seats untouched, because a seat's Om
 - `workspace/lab-guide/` is the code-server extension behind the workspace's **Lab guide** tab. `extension.js` builds the panel from `~/README.md`, sends commands to the `Lab` terminal, copies values and opens links. `status.js` holds the status checks, and `node status.js` prints them all as JSON. A command with `--watch` or `-w` runs in its own `Watch` terminal beside `Lab`. A step stays ticked once its check passes, even if the check later fails, for example during the failover. `media/` holds the panel's script, styles and icon.
 - `docker/pve-assistant/` builds the image that prepares the unattended Proxmox installer.
 - `tools/site-check.sh` runs standalone on a Proxmox host or desktop at a candidate site, with no dependency on the rest of the repo.
+- `docs/site-request.md` is the hosting request to hand a site's IT staff: size per seat count, nested virtualization, outbound destinations, remote access options, security, and questions to settle.
 
 ## Configuration and state
 
@@ -203,7 +204,7 @@ Run the pinned code-server from `.lab/host/bin/code-server.tar.gz` on `127.0.0.1
 ## Network requirements on a new site
 
 - A Proxmox VE 9 host with root SSH, or a Debian 13 VM to install it on.
-- Outbound TCP 443, and outbound UDP and TCP 7844 for `cloudflared`, which has no alternative port.
+- Outbound TCP 443, outbound UDP and TCP 7844 for `cloudflared`, which has no alternative port, outbound UDP 123 to `time.cloudflare.com` for Talos, and outbound TCP 80 to the Debian and Proxmox package mirrors, which apt uses over HTTP.
 - KVM inside the Proxmox host, meaning the `vmx` or `svm` flag and `/dev/kvm`, when Proxmox itself runs as a VM.
 - Per seat, about 9 GB of RAM and 6 vCPUs for the Talos VMs, about 1 GB for the Omni container, and about 1.5 GB for the workspace. Each seat's disks are thin: 96 GB of VM disks, of which Talos fills a few GB, plus 12 GB for the two containers.
 - Per seat, one download of about 370 MB from `factory.talos.dev` while students build their images, about 7.5 GB for 20 seats if they all do it at once. The image lands in `/var/lib/talos-lab/iso` on the host's root filesystem.
