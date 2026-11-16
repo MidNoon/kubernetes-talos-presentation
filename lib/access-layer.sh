@@ -4,6 +4,9 @@ readonly ACCESS_REMOTE_ETC=/etc/talos-access
 readonly ACCESS_CONNECT_TIMEOUT=180
 readonly ACCESS_FINGERPRINT_PATTERN='^SHA256:[A-Za-z0-9+/]{43}$'
 readonly ACCESS_SERVE_TIMEOUT=3600
+readonly ACCESS_API_PORT=18006
+readonly ACCESS_DISK_STORAGE=lab-disks
+readonly ACCESS_DISK_PATH=/var/lib/lab-disks
 
 ACCESS_STATE="$LAB_STATE/access"
 
@@ -199,6 +202,58 @@ access_serve() {
     sleep 2
   done
   log "bootstrap fetched, the address is closed. Run ./lab access verify with the host key the site host printed"
+}
+
+access_render_target() {
+  local node="$1" secret="$2" pin="$3"
+  printf 'PVE_URL=%q\n' "https://127.0.0.1:$ACCESS_API_PORT"
+  printf 'PVE_NODE=%q\n' "$node"
+  printf 'PVE_TOKEN_ID=%q\n' "$PVE_API_USER!$PVE_API_TOKEN_NAME"
+  printf 'PVE_TOKEN_SECRET=%q\n' "$secret"
+  printf 'PVE_TLS_PIN=%q\n' "$pin"
+  printf 'PVE_DISK_STORAGE=%q\n' "$ACCESS_DISK_STORAGE"
+  printf 'PVE_SSH=%q\n' "root@$(cf_access_hostname)"
+  printf 'PVE_SSH_KEY=%q\n' "$(access_key)"
+  printf 'PVE_SSH_KNOWN_HOSTS=%q\n' "$(access_known_hosts)"
+  printf 'PVE_SSH_ACCESS=%q\n' "$ACCESS_STATE/service-token.env"
+}
+
+access_target() {
+  local target="$LAB_STATE/pve-target.env" remote node secret pin version
+  access_load_config
+  access_use_target || exit 1
+  if [[ -e "$target" ]] && ! grep -qxF "PVE_SSH=$PVE_SSH" "$target"; then
+    die "$target points at another Proxmox host ($(grep -E '^PVE_SSH=' "$target")). Move it aside first"
+  fi
+  remote="$(pve_remote USER="$PVE_API_USER" TOKEN="$PVE_API_TOKEN_NAME" ROLES="$PVE_API_ROLES" \
+    STORAGE="$ACCESS_DISK_STORAGE" STORAGE_PATH="$ACCESS_DISK_PATH" <<'EOF'
+set -euo pipefail
+command -v pveum >/dev/null || { echo "Proxmox VE is not installed on $(hostname)" >&2; exit 1; }
+pveum user list --output-format json | grep -q "\"userid\":\"$USER\"" || pveum user add "$USER"
+pveum acl modify / --users "$USER" --roles "$ROLES"
+pveum user token remove "$USER" "$TOKEN" >/dev/null 2>&1 || true
+secret="$(pveum user token add "$USER" "$TOKEN" --privsep 0 --output-format json | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')"
+if ! grep -qxE "dir: $STORAGE" /etc/pve/storage.cfg 2>/dev/null; then
+  install -d -m 700 "$STORAGE_PATH"
+  pvesm add dir "$STORAGE" --path "$STORAGE_PATH" --content images,rootdir >/dev/null
+fi
+pin="$(openssl s_client -connect 127.0.0.1:8006 </dev/null 2>/dev/null | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64)"
+printf 'node=%s\nsecret=%s\npin=%s\n' "$(hostname)" "$secret" "$pin"
+EOF
+  )" || die "could not create the API token and storage on $PVE_SSH"
+  node="$(sed -n 's/^node=//p' <<<"$remote")"
+  secret="$(sed -n 's/^secret=//p' <<<"$remote")"
+  pin="$(sed -n 's/^pin=//p' <<<"$remote")"
+  local LAB_SCRUB="$secret"
+  [[ -n "$node" && "$secret" =~ ^[0-9a-f-]{36}$ && "$pin" =~ ^[A-Za-z0-9+/]{43}=$ ]] ||
+    die "the site host returned an unexpected node, token or pin: $(lab_scrub "$remote")"
+  (
+    umask 077
+    access_render_target "$node" "$secret" "$pin" >"$target"
+  )
+  pve_load_target || exit 1
+  version="$(pve_api GET /version | jq -r .data.version)" || exit 1
+  log "$target reaches Proxmox $version on $node through Cloudflare Access, with VM disks on $ACCESS_DISK_STORAGE"
 }
 
 access_ssh() {

@@ -18,7 +18,7 @@ source "$LAB_ROOT/lib/access-layer.sh"
 
 usage() {
   cat >&2 <<'EOF'
-usage: lab access up|serve|down
+usage: lab access up|serve|target|down
        lab access verify [host-key-fingerprint]
        lab access ssh [command...]
        lab proxmox up|verify|down
@@ -52,6 +52,11 @@ main() {
         serve)
           (($# == 2)) || usage
           access_serve
+          ;;
+        target)
+          (($# == 2)) || usage
+          lab_lock "$*"
+          access_target
           ;;
         down)
           (($# == 2)) || usage

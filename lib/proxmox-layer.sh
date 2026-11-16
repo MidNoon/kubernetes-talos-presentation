@@ -16,9 +16,6 @@ readonly PROXMOX_ISO_NAME=proxmox-ve_9.2-1.iso
 readonly PROXMOX_ISO_URL="https://enterprise.proxmox.com/iso/$PROXMOX_ISO_NAME"
 readonly PROXMOX_ISO_SHA256=4e88fe416df9b527624a175f24c9aa07c714d3332afb1ee3dbf3879573ef2c6c
 readonly PROXMOX_ASSISTANT_IMAGE=talos-lab/pve-assistant:local
-readonly PROXMOX_API_USER=talos-lab@pve
-readonly PROXMOX_API_TOKEN=kit
-readonly PROXMOX_API_ROLES=PVEVMAdmin,PVEDatastoreAdmin,PVESDNUser,PVEPoolAdmin
 readonly PROXMOX_INSTALL_TIMEOUT=1800
 readonly PROXMOX_REQUIRED_PRIVILEGES=(
   VM.Allocate VM.Audit VM.PowerMgmt VM.Config.CDROM VM.Config.CPU VM.Config.Disk
@@ -334,24 +331,24 @@ proxmox_bootstrap_api() {
   [[ -n "$pin" ]] || die "could not read the TLS public key from $PROXMOX_ADDRESS:8006"
   proxmox_root_session "$pin"
   users="$(proxmox_root_api GET /access/users)"
-  if ! jq -e --arg user "$PROXMOX_API_USER" '.data | any(.userid == $user)' <<<"$users" >/dev/null; then
-    proxmox_root_api POST /access/users --data-urlencode "userid=$PROXMOX_API_USER" >/dev/null
+  if ! jq -e --arg user "$PVE_API_USER" '.data | any(.userid == $user)' <<<"$users" >/dev/null; then
+    proxmox_root_api POST /access/users --data-urlencode "userid=$PVE_API_USER" >/dev/null
   fi
   proxmox_root_api PUT /access/acl \
     --data-urlencode path=/ \
-    --data-urlencode "users=$PROXMOX_API_USER" \
-    --data-urlencode "roles=$PROXMOX_API_ROLES" \
+    --data-urlencode "users=$PVE_API_USER" \
+    --data-urlencode "roles=$PVE_API_ROLES" \
     --data-urlencode propagate=1 >/dev/null
-  tokens="$(proxmox_root_api GET "/access/users/$PROXMOX_API_USER/token")"
-  if jq -e --arg token "$PROXMOX_API_TOKEN" '.data | any(.tokenid == $token)' <<<"$tokens" >/dev/null; then
-    proxmox_root_api DELETE "/access/users/$PROXMOX_API_USER/token/$PROXMOX_API_TOKEN" >/dev/null
+  tokens="$(proxmox_root_api GET "/access/users/$PVE_API_USER/token")"
+  if jq -e --arg token "$PVE_API_TOKEN_NAME" '.data | any(.tokenid == $token)' <<<"$tokens" >/dev/null; then
+    proxmox_root_api DELETE "/access/users/$PVE_API_USER/token/$PVE_API_TOKEN_NAME" >/dev/null
   fi
-  created="$(proxmox_root_api POST "/access/users/$PROXMOX_API_USER/token/$PROXMOX_API_TOKEN" --data-urlencode privsep=0)"
+  created="$(proxmox_root_api POST "/access/users/$PVE_API_USER/token/$PVE_API_TOKEN_NAME" --data-urlencode privsep=0)"
   secret="$(jq -er .data.value <<<"$created")" || die "Proxmox did not return a secret for the new API token"
   {
     printf 'PVE_URL=%q\n' "https://$PROXMOX_ADDRESS:8006"
     printf 'PVE_NODE=%q\n' "$PROXMOX_NODE"
-    printf 'PVE_TOKEN_ID=%q\n' "$PROXMOX_API_USER!$PROXMOX_API_TOKEN"
+    printf 'PVE_TOKEN_ID=%q\n' "$PVE_API_USER!$PVE_API_TOKEN_NAME"
     printf 'PVE_TOKEN_SECRET=%q\n' "$secret"
     printf 'PVE_TLS_PIN=%q\n' "$pin"
     printf 'PVE_DISK_STORAGE=%q\n' local-lvm

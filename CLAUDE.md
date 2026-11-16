@@ -15,6 +15,7 @@ Students build a Talos install image in their Omni, have Proxmox download it, ma
 ```bash
 ./lab access up|down                         # SSH to a site host through a Cloudflare Tunnel behind Access
 ./lab access serve                           # hand the site host its bootstrap once, as a one-line curl command
+./lab access target                          # API token and disk storage on the site's Proxmox, written to .lab/pve-target.env
 ./lab access verify [SHA256:...]             # record the site host's key on first contact, then check it
 ./lab access ssh [command...]                # a shell or a command on the site host, without the run lock
 ./lab proxmox up|verify|down                 # nested Proxmox VM on the local libvirt host
@@ -82,13 +83,13 @@ The repository is intended to become public. Account IDs, the domain and the EUL
 - `access/` holds the site host's SSH key pair and known_hosts in `ssh/`, the Access service token in `service-token.env`, the tunnel connector token, `bootstrap.sh` for the site host, and the control socket `master`. `access down` keeps the key pair.
 - `logs/` and `failures/`, which holds the context a failed run saved.
 
-`.lab/pve-target.env` is the interface between Proxmox and everything above it. `./lab proxmox up` writes it for the nested lab. For another Proxmox, write it by hand with these keys:
+`.lab/pve-target.env` is the interface between Proxmox and everything above it. `./lab proxmox up` writes it for the nested lab, and `./lab access target` writes it for a site host reached through Access. It refuses to replace a target that points at another host. For any other Proxmox, write it by hand with these keys:
 - `PVE_URL`, `PVE_NODE`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET` and `PVE_TLS_PIN`.
 - `PVE_DISK_STORAGE`, which holds VM disks.
 - `PVE_SSH` (`root@host`), `PVE_SSH_KEY` and `PVE_SSH_KNOWN_HOSTS`.
 - `PVE_SSH_ACCESS`, optional, the path of `.lab/access/service-token.env`. It sends SSH through Cloudflare Access with `PVE_SSH=root@ssh.<zone>`, the key and known_hosts in `.lab/access/ssh/`, and `PVE_URL=https://127.0.0.1:<port>`. Each run then opens one SSH connection that other SSH calls share and that forwards that port to the host's API on 8006.
 
-The token needs the roles `PVEVMAdmin`, `PVEDatastoreAdmin`, `PVESDNUser` and `PVEPoolAdmin`. `PVE_TLS_PIN` is the base64 SHA-256 of the server's public key. Root SSH is key-only and checks the host key strictly.
+The token belongs to `talos-lab@pve`, which has the roles `PVEVMAdmin`, `PVEDatastoreAdmin`, `PVESDNUser` and `PVEPoolAdmin` on `/`. `PVE_TLS_PIN` is the base64 SHA-256 of the server's public key. Root SSH is key-only and checks the host key strictly.
 
 ## Safety rules
 
@@ -123,6 +124,8 @@ The access layer may write only the tunnel `talos-lab-access`, the CNAME `ssh`, 
 `./lab access serve` hands that file out once, so nobody types the token at a console. It serves it from this machine through a Cloudflare quick tunnel at a random `trycloudflare.com` address, under a random 16-hex-digit path, with an empty page at `/`. It prints `curl -fsSL <address>/<path> | bash` and stops after the first successful fetch or after an hour. A quick tunnel needs no Cloudflare account resources.
 
 `./lab access verify SHA256:...` connects through `cloudflared access ssh` with the service token and records the host key only if it matches that fingerprint. Later calls check it strictly. `./lab access down` has the host remove its connector, unit and our key 5 seconds later, then deletes the application, token, record and tunnel.
+
+`./lab access target` creates `talos-lab@pve` and its token over SSH, adds the directory storage `lab-disks` at `/var/lib/lab-disks` for VM disks and container root filesystems, so students never see the host's `local` storage, and reads the pin from the live web interface on 8006.
 
 **Host.** The host layer prepares the Proxmox host:
 - It disables the enterprise apt sources, installs dnsmasq, and loads the WireGuard module.
@@ -222,6 +225,10 @@ It runs three systemd services:
 - `ssh -S` replaces an earlier `-o ControlPath`, so a seat's Omni forward keeps its own control socket while other SSH calls share the access connection.
 - A new SSH connection through Cloudflare Access takes a few seconds, against a fraction of a second over a shared connection.
 - In `jq`, `false // x` returns `x`. Compare booleans explicitly when `false` is a meaningful value.
+- Proxmox VE 9 goes on Debian 13 as the Proxmox wiki describes: hostname resolving to the real address in `/etc/hosts`, the no-subscription repository with the trixie keyring, `proxmox-default-kernel` and a reboot, then `proxmox-ve postfix open-iscsi chrony`, then removing the Debian kernels and `os-prober`. The install adds `pve-enterprise.sources`, which fails without a subscription until it is disabled.
+- On Proxmox, ifupdown2 runs `dhclient` for an `inet dhcp` interface, and Debian's AppArmor profile for `dhclient` blocks its unix sockets under the Proxmox kernel, so it exits at once. Disabling that profile through `/etc/apparmor.d/disable/sbin.dhclient` fixes it. Until then, an address left by NetworkManager hides the problem until its lease runs out.
+- `pvenetcommit` moves a pending `/etc/network/interfaces.new` over `/etc/network/interfaces` at boot, so a hand edit of `interfaces` is lost when a pending file exists.
+- Debian's NetworkManager lets go of interfaces listed in `/etc/network/interfaces` because of `[ifupdown] managed=false`. On a Debian site host with a desktop, NetworkManager is masked rather than removed, because removing it removes the `gnome` metapackage.
 - A `$(...)` subshell that calls `lab_on_exit` sets its own EXIT trap and holds a copy of the parent's hooks, so each hook records the process that registered it and runs only when that process exits. Otherwise the first `seat_omnictl` in a subshell would close the run's shared access connection.
 
 ## Looking at the guide panel locally

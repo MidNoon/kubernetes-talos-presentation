@@ -613,6 +613,19 @@ EOF
   [[ "$(cat "$FAKE/hooks")" == "$(printf 'child\nafter inner done\nparent %s' "$(awk '{print $2}' "$FAKE/main")")" ]]
 }
 
+test_access_target_sends_every_call_through_access() {
+  local file="$WORK/target.env" var
+  access_render_target site-host 11111111-2222-3333-4444-555555555555 "$(printf 'A%.0s' {1..43})=" >"$file"
+  (
+    source "$file"
+    for var in PVE_URL PVE_NODE PVE_TOKEN_ID PVE_TOKEN_SECRET PVE_TLS_PIN PVE_DISK_STORAGE PVE_SSH PVE_SSH_KEY PVE_SSH_KNOWN_HOSTS PVE_SSH_ACCESS; do
+      [[ -n "${!var:-}" ]] || exit 1
+    done
+    [[ "$PVE_URL" == https://127.0.0.1:18006 && "$PVE_SSH" == root@ssh.zone.example && "$PVE_TOKEN_ID" == 'talos-lab@pve!kit' ]] || exit 1
+    [[ "$PVE_SSH_ACCESS" == "$ACCESS_STATE/service-token.env" && "$PVE_SSH_KEY" == "$ACCESS_STATE/ssh/id_ed25519" && "$PVE_DISK_STORAGE" == lab-disks ]]
+  )
+}
+
 passed=0
 failed=0
 for name in $(declare -F | awk '{print $3}' | grep '^test_'); do

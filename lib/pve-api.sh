@@ -1,3 +1,7 @@
+readonly PVE_API_USER=talos-lab@pve
+readonly PVE_API_TOKEN_NAME=kit
+readonly PVE_API_ROLES=PVEVMAdmin,PVEDatastoreAdmin,PVESDNUser,PVEPoolAdmin
+
 pve_load_target() {
   local target="${LAB_PVE_TARGET:-$LAB_STATE/pve-target.env}" var
   [[ -r "$target" ]] || {
