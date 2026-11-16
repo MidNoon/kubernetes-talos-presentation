@@ -17,7 +17,7 @@ Students reach all of it through a Cloudflare Tunnel that the host opens outward
 - **Nested virtualization** turned on for that VM, because Proxmox runs virtual machines inside it.
 - **An operating system:** Proxmox VE 9 installed from the official ISO, or a minimal Debian 13 that we turn into Proxmox VE 9.
 - **Outbound internet access** to the destinations listed under Network, and **no inbound access** from the internet.
-- **Remote access for the two of us** to set up and run the host. Our options are under Remote access, in order of preference.
+- **Remote access for the two of us** to set up and run the host, through an SSH tunnel the VM opens outward, described under Remote access.
 - **Time:** the VM a week before the session, so we can install it and rehearse full runs, until we remove everything after the session.
 
 ## Size
@@ -51,7 +51,7 @@ Student VMs reach the network through the host's own address, so the hypervisor 
 
 ## Network
 
-Inbound: nothing from the internet. We need SSH (TCP 22) and the Proxmox web interface (TCP 8006) from the remote access path we agree on.
+Inbound: nothing. We reach the VM's SSH through a tunnel it opens outward.
 
 Outbound, from the VM:
 
@@ -65,6 +65,7 @@ Outbound, from the VM:
 | Website container images | `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com` | 443 TCP |
 | Time | `time.cloudflare.com` | 123 UDP |
 | Packages, during setup | `deb.debian.org`, `security.debian.org`, `download.proxmox.com` | 80 TCP |
+| Tunnel software, during setup | `github.com`, `release-assets.githubusercontent.com` | 443 TCP |
 | DNS | the university's resolvers | 53 |
 
 A transparent firewall is easiest. If outbound traffic must go through a web proxy, we need to know, because the tunnel and Talos must be configured for it.
@@ -75,26 +76,22 @@ Students' laptops need ordinary HTTPS access to Cloudflare and to the lab's doma
 
 ## Remote access
 
-In order of preference:
-- **University VPN with SSH.** VPN accounts for two people, and from the VPN, TCP 22 and 8006 to the VM. This uses your standard path and needs nothing extra on the VM.
-- **Outbound management tunnel.** If VPN access is not possible, we run a Cloudflare Tunnel on the VM that carries only SSH, behind Cloudflare Access, which requires our sign-in before any connection reaches the VM. It uses the same outbound ports the lab already needs, so nothing new opens.
-- **Console only.** Someone on site pastes commands we send. This works for the first steps and is too slow for running the lab.
+We reach the VM through a Cloudflare Tunnel that carries only SSH, protected by Cloudflare Access:
+- The VM opens the tunnel outward on the ports the lab already uses, so it needs no inbound port and no VPN account.
+- Access lets a connection through only with our service token, and SSH on the VM accepts only our key.
 
-On the first day, someone with console or root access does two things:
-- tells us the VM's address;
-- adds our SSH public key, which we send beforehand, to `root`:
+On the first day, someone with root on the VM runs one script we send beforehand, `bootstrap.sh`, as root. It:
+- adds our SSH public key to `root`;
+- installs a pinned `cloudflared` and runs it as the `talos-access` service;
+- prints the VM's SSH host key fingerprint.
 
-```bash
-install -d -m 700 /root/.ssh
-printf '%s\n' '<our public key>' >>/root/.ssh/authorized_keys
-chmod 600 /root/.ssh/authorized_keys
-```
+They send us that fingerprint, and we check it when we first connect. After that, we do the rest: a network and virtualization check, the Proxmox install if the VM runs Debian, and the lab itself. At the end, we remove the service, our key and the tunnel.
 
-After that, we do the rest: a network and virtualization check, the Proxmox install if the VM runs Debian, and the lab itself.
+If you prefer your VPN, VPN accounts for two people with TCP 22 and 8006 to the VM work too. Then only our key goes on the VM.
 
 ## Security and data
 
-- No inbound ports are open to the internet. The host makes only outbound connections.
+- No inbound ports are open to the internet. The host makes only outbound connections, including the tunnel we manage it through.
 - Each student gets their own private network, cluster manager, Proxmox resource pool and storage. Omni and Proxmox show each student only their own.
 - Logins are issued by the lab for the session, one per seat. No university accounts or student personal data are used.
 - Students' VMs reach the internet through the host's address. The host drops their traffic to other students' networks, to the host itself, and to every private, carrier-grade NAT and link-local range (`10.0.0.0/8`, `100.64.0.0/10`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`). Only DNS to the resolvers you give us is allowed. University ranges outside those, such as internal networks on public addresses, can be added to the blocked list, or the VM can sit on an isolated network segment.
@@ -108,9 +105,9 @@ After that, we do the rest: a network and virtualization check, the Proxmox inst
 - Which hypervisor, and can nested virtualization be turned on?
 - Proxmox VE 9 or Debian 13, and who installs it?
 - What RAM, vCPUs and SSD storage are available?
-- Is VPN access with SSH to the VM possible? If not, is the outbound management tunnel acceptable?
+- Is the outbound SSH tunnel through Cloudflare Access acceptable, or do you prefer VPN access?
 - Are any outbound ports or destinations blocked, is there a proxy, and which DNS servers should the VM use?
 - Static address or DHCP? Is the VM on an isolated segment, or are there internal ranges on public addresses to block?
-- Who has console access on the first day?
+- Who can run our bootstrap script as root on the first day, and how do we get it to them?
 - Are there policies or forms for external services, such as Cloudflare and Sidero Labs' Image Factory?
 - Who is our contact in IT?

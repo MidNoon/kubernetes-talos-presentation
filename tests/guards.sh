@@ -18,6 +18,8 @@ cat >"$FAKE_BIN/cf" <<'EOF'
 printf '%s\n' "$*" >>"$FAKE/cf-calls"
 case "$*" in
   "tunnels list"*) cat "$FAKE/cf-tunnels" ;;
+  "zero-trust access applications list"*) cat "$FAKE/cf-apps" ;;
+  "zero-trust access service-tokens list"*) cat "$FAKE/cf-service-tokens" ;;
   "dns records list"*) cat "$FAKE/cf-dns" ;;
   "tunnels connections cleanup"*) exit 0 ;;
   "tunnels config update"*) exit 0 ;;
@@ -60,6 +62,8 @@ reset_fake() {
   mkdir -p "$FAKE"
   printf '[{"id":"home-tunnel-id","name":"home-tunnel","deleted_at":null}]\n' >"$FAKE/cf-tunnels"
   printf '[{"id":"other-rec","name":"other.zone.example","type":"A","content":"192.0.2.1"},{"id":"www-rec","name":"www.zone.example","type":"CNAME","content":"home-tunnel-id.cfargotunnel.com"}]\n' >"$FAKE/cf-dns"
+  printf '[{"id":"other-app","name":"vpn","domain":"vpn.zone.example"},{"id":"access-app","name":"talos-lab-access","domain":"ssh.zone.example"}]\n' >"$FAKE/cf-apps"
+  printf '[{"id":"other-token","name":"ci"},{"id":"access-token","name":"talos-lab-access"}]\n' >"$FAKE/cf-service-tokens"
   : >"$FAKE/cf-calls"
   printf '{"data":[{"vmid":100,"name":"unrelated","status":"running"},{"vmid":9011,"name":"seat01-cp","status":"stopped"},{"vmid":9012,"name":"intruder","status":"running"}]}\n' >"$FAKE/pve-qemu"
   printf '{"data":[{"vmid":"9010","name":"omni01","status":"running"}]}\n' >"$FAKE/pve-lxc"
@@ -76,8 +80,10 @@ load_libs() {
   source "$LAB_ROOT/lib/site-layer.sh"
   source "$LAB_ROOT/lib/failover-layer.sh"
   source "$LAB_ROOT/lib/upgrade-layer.sh"
+  source "$LAB_ROOT/lib/access-layer.sh"
   LAB_STATE="$WORK/state"
   HOST_STATE="$LAB_STATE/host"
+  ACCESS_STATE="$LAB_STATE/access"
   LAB_SEATS_STATE="$LAB_STATE/seats"
   mkdir -p "$HOST_STATE" "$LAB_SEATS_STATE"
   LAB_CF_ACCOUNT_ID=acct
@@ -501,6 +507,100 @@ EOF
   ! grep -qF 'or seat' "$FAKE/one" || return 1
   grep -qF 'not the host or seat 02' "$FAKE/two" || return 1
   [[ "$(cat "$FAKE/probed")" == $'pct exec 9014 -- bash -s\npct exec 9014 -- bash -s' ]]
+}
+
+test_cf_allowlist_permits_the_access_tunnel_and_hostname() {
+  LAB_TUNNEL_NAME=talos-lab-access
+  cf_allowed tunnels create --name talos-lab-access --config-source cloudflare || return 1
+  LAB_TUNNEL_HOSTNAME=ssh.zone.example
+  cf_allowed dns records create -z zone.example --body '{"type":"CNAME","name":"ssh.zone.example","content":"x.cfargotunnel.com"}' || return 1
+  LAB_TUNNEL_HOSTNAME=ssh2.zone.example
+  cf_refused dns records create -z zone.example --body '{"type":"CNAME","name":"ssh2.zone.example","content":"x.cfargotunnel.com"}'
+}
+test_host_layer_does_not_claim_the_access_tunnel() {
+  ! cf_tunnel_name_owned talos-lab-access && ! cf_hostname_owned ssh.zone.example
+}
+test_cf_allowlist_limits_access_applications_to_the_lab_one() {
+  local body
+  CF_ACCESS_TOKEN_ID=token_uuid
+  body="$(access_render_app)"
+  cf_allowed zero-trust access applications create --body "$body" || return 1
+  jq -e '.policies == [{name: "talos-lab-access", decision: "non_identity", include: [{service_token: {token_id: "token_uuid"}}]}] and .type == "self_hosted"' <<<"$body" >/dev/null || return 1
+  cf_refused zero-trust access applications create --body "$(jq -c '.domain = "vpn.zone.example"' <<<"$body")" || return 1
+  cf_refused zero-trust access applications create --body "$(jq -c '.name = "vpn"' <<<"$body")" || return 1
+  cf_refused zero-trust access applications create --body "$(jq -c '.type = "ssh"' <<<"$body")" || return 1
+  cf_refused zero-trust access applications delete other-app --force || return 1
+  CF_ACCESS_APP_ID=access-app
+  cf_allowed zero-trust access applications delete access-app --force || return 1
+  cf_refused zero-trust access applications delete other-app --force || return 1
+  cf_refused zero-trust access applications update access-app --body "$body"
+}
+test_cf_allowlist_limits_service_tokens_to_the_lab_one() {
+  cf_allowed zero-trust access service-tokens create --name talos-lab-access || return 1
+  cf_refused zero-trust access service-tokens create --name ci || return 1
+  cf_refused zero-trust access service-tokens delete other-token --force || return 1
+  CF_ACCESS_TOKEN_ID=access-token
+  cf_allowed zero-trust access service-tokens delete access-token --force || return 1
+  cf_refused zero-trust access service-tokens delete other-token --force || return 1
+  cf_refused zero-trust access service-tokens refresh access-token
+}
+test_access_snapshot_covers_everything_but_access_resources() {
+  local snapshot
+  printf '[{"id":"home-tunnel-id","name":"home-tunnel","deleted_at":null},{"id":"host-id","name":"talos-lab-host","deleted_at":null},{"id":"access-id","name":"talos-lab-access","deleted_at":null}]\n' >"$FAKE/cf-tunnels"
+  printf '[{"id":"ssh-rec","name":"ssh.zone.example","type":"CNAME","content":"access-id.cfargotunnel.com"},{"id":"pve-rec","name":"pve.zone.example","type":"CNAME","content":"host-id.cfargotunnel.com"}]\n' >"$FAKE/cf-dns"
+  snapshot="$(cf_snapshot_access_others)" || return 1
+  [[ "$snapshot" == "$(printf '%s\n' 'access-app other-app vpn vpn.zone.example' 'dns pve-rec pve.zone.example CNAME host-id.cfargotunnel.com' 'service-token other-token ci' 'tunnel home-tunnel-id home-tunnel' 'tunnel host-id talos-lab-host' | sort)" ]] || return 1
+  [[ "$(cf_snapshot_others)" == "$(printf '%s\n' 'dns ssh-rec ssh.zone.example CNAME access-id.cfargotunnel.com' 'tunnel access-id talos-lab-access' 'tunnel home-tunnel-id home-tunnel' | sort)" ]] || return 1
+  cf_lookup_access || return 1
+  [[ "$CF_ACCESS_APP_ID" == access-app && "$CF_ACCESS_TOKEN_ID" == access-token ]]
+}
+test_access_bootstrap_installs_the_pinned_connector_and_key() {
+  local script
+  mkdir -p "$ACCESS_STATE/ssh"
+  printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPUBLICKEYFORTESTS talos-lab-site\n' >"$ACCESS_STATE/ssh/id_ed25519.pub"
+  printf '%s' "$LONG_CONNECTOR_TOKEN" >"$ACCESS_STATE/connector-token"
+  script="$(access_render_bootstrap)" || return 1
+  bash -n <<<"$script" || return 1
+  grep -qF "releases/download/$HOST_CLOUDFLARED_VERSION/cloudflared-linux-amd64" <<<"$script" || return 1
+  grep -qF "$HOST_CLOUDFLARED_SHA256" <<<"$script" || return 1
+  grep -qF "grep -qxF 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPUBLICKEYFORTESTS talos-lab-site' /root/.ssh/authorized_keys" <<<"$script" || return 1
+  [[ "$(grep -cF "$LONG_CONNECTOR_TOKEN" <<<"$script")" == 1 ]] || return 1
+  grep -qF 'ExecStart=/usr/local/lib/talos-access/cloudflared tunnel --no-autoupdate run' <<<"$script" || return 1
+  ! grep -qE '\$(HOST|ACCESS)_' <<<"$script"
+}
+test_pve_ssh_goes_through_access_only_when_set() {
+  PVE_SSH_KEY=key PVE_SSH_KNOWN_HOSTS=known
+  pve_ssh_options
+  [[ " ${PVE_SSH_OPTIONS[*]} " == *" ConnectTimeout=10 "* && " ${PVE_SSH_OPTIONS[*]} " != *ProxyCommand* ]] || return 1
+  PVE_SSH_ACCESS="$WORK/token.env"
+  pve_ssh_options
+  [[ " ${PVE_SSH_OPTIONS[*]} " == *" ProxyCommand=$LAB_STATE/host/bin/cloudflared access ssh --hostname %h "* ]] || return 1
+  [[ " ${PVE_SSH_OPTIONS[*]} " == *" ControlPath=$LAB_STATE/access/master "* && " ${PVE_SSH_OPTIONS[*]} " != *ConnectTimeout=10* ]]
+}
+test_pve_access_needs_the_api_forwarded_to_localhost() {
+  mkdir -p "$LAB_STATE/host/bin"
+  printf '#!/bin/sh\n' >"$LAB_STATE/host/bin/cloudflared"
+  chmod 755 "$LAB_STATE/host/bin/cloudflared"
+  printf 'TUNNEL_SERVICE_TOKEN_ID=id.access\nTUNNEL_SERVICE_TOKEN_SECRET=%s\n' "$SECRET_PASSWORD" >"$WORK/token.env"
+  PVE_SSH_ACCESS="$WORK/token.env" PVE_SSH=root@ssh.zone.example PVE_URL=https://pve.example:8006
+  ! pve_access_open 2>"$WORK/err" || return 1
+  grep -qF 'must be https://127.0.0.1:<port>' "$WORK/err" || return 1
+  [[ "$TUNNEL_SERVICE_TOKEN_ID" == id.access ]]
+}
+
+test_exit_hooks_run_only_in_the_process_that_registered_them() {
+  lab_strict "$(
+    cat <<'EOF'
+parent_hook() { printf 'parent %s\n' "$BASHPID" >>"$FAKE/hooks"; }
+child_hook() { printf 'child\n' >>"$FAKE/hooks"; }
+lab_on_exit parent_hook
+lab_on_exit parent_hook
+inner="$(lab_on_exit child_hook; printf 'inner done')"
+printf 'after %s\n' "$inner" >>"$FAKE/hooks"
+printf 'main %s\n' "$BASHPID" >>"$FAKE/main"
+EOF
+  )" || return 1
+  [[ "$(cat "$FAKE/hooks")" == "$(printf 'child\nafter inner done\nparent %s' "$(awk '{print $2}' "$FAKE/main")")" ]]
 }
 
 passed=0

@@ -13,6 +13,9 @@ Students build a Talos install image in their Omni, have Proxmox download it, ma
 ## Commands
 
 ```bash
+./lab access up|down                         # SSH to a site host through a Cloudflare Tunnel behind Access
+./lab access verify [SHA256:...]             # record the site host's key on first contact, then check it
+./lab access ssh [command...]                # a shell or a command on the site host, without the run lock
 ./lab proxmox up|verify|down                 # nested Proxmox VM on the local libvirt host
 ./lab host up|verify|down                    # shared services on the Proxmox host
 ./lab seats create <count>|delete            # per-seat network, Omni, ISO storage, workspace, logins, site tunnel
@@ -45,9 +48,10 @@ Running `seats create` again leaves running seats untouched, because a seat's Om
 
 - `lab` dispatches commands and takes the run lock.
 - `lib/common.sh` has the Talos and Kubernetes versions a cluster starts on and is upgraded to, logging, config loading, the lock, exit hooks and `lab_public_curl`.
-- `lib/pve-api.sh` is the Proxmox REST client, root SSH and SSH forwards, and the guest name guards.
+- `lib/pve-api.sh` is the Proxmox REST client, root SSH and SSH forwards, the Cloudflare Access transport, and the guest name guards.
 - `lib/cloudflare.sh` is the only path to `cf`, through `cf_query` and its allowlist, plus tunnel and DNS primitives.
 - `lib/proxmox-layer.sh` builds the nested Proxmox VM with libvirt.
+- `lib/access-layer.sh` builds and removes the SSH path to a site host through Cloudflare Access, and its bootstrap script.
 - `lib/host-layer.sh` builds the shared services on the Proxmox host.
 - `lib/seats-layer.sh` builds and removes seats. `seat_omnictl` is the only path to a seat's Omni.
 - `lib/rehearsal-layer.sh`, `lib/site-layer.sh`, `lib/failover-layer.sh` and `lib/upgrade-layer.sh` play a student's run on a seat. The site layer holds the public probe, timeline and summary that failover and upgrade share.
@@ -73,13 +77,14 @@ The repository is intended to become public. Account IDs, the domain and the EUL
 - `host/` holds the downloaded binaries, the Dex client secrets for Omni and Proxmox, `users.tsv`, the host resolver in `host-dns`, and the host tunnel token.
 - `seats/seatNN/` holds the seat's Omni account ID and etcd key, and its Admin and workspace Operator service account keys. It also holds the site tunnel token, `sheet.txt` (the card to hand the student), and the rehearsal kubeconfig, cluster template and failover runs.
 - `guide/lab-guide.vsix`, the packed guide extension.
-- `site/ssh/` holds the key pair for a site's Proxmox host. Its public half goes to the site's IT staff for root's `authorized_keys`, and that host's `PVE_SSH_KEY` points at the private half.
+- `access/` holds the site host's SSH key pair and known_hosts in `ssh/`, the Access service token in `service-token.env`, the tunnel connector token, `bootstrap.sh` for the site host, and the control socket `master`. `access down` keeps the key pair.
 - `logs/` and `failures/`, which holds the context a failed run saved.
 
 `.lab/pve-target.env` is the interface between Proxmox and everything above it. `./lab proxmox up` writes it for the nested lab. For another Proxmox, write it by hand with these keys:
 - `PVE_URL`, `PVE_NODE`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET` and `PVE_TLS_PIN`.
 - `PVE_DISK_STORAGE`, which holds VM disks.
 - `PVE_SSH` (`root@host`), `PVE_SSH_KEY` and `PVE_SSH_KNOWN_HOSTS`.
+- `PVE_SSH_ACCESS`, optional, the path of `.lab/access/service-token.env`. It sends SSH through Cloudflare Access with `PVE_SSH=root@ssh.<zone>`, the key and known_hosts in `.lab/access/ssh/`, and `PVE_URL=https://127.0.0.1:<port>`. Each run then opens one SSH connection that other SSH calls share and that forwards that port to the host's API on 8006.
 
 The token needs the roles `PVEVMAdmin`, `PVEDatastoreAdmin`, `PVESDNUser` and `PVEPoolAdmin`. `PVE_TLS_PIN` is the base64 SHA-256 of the server's public key. Root SSH is key-only and checks the host key strictly.
 
@@ -95,6 +100,8 @@ These guests are only started, stopped or deleted when their ID and name both ma
 
 **Cloudflare calls.** The `cf` login reaches every zone and tunnel in the account. `cf_assert_allowed` limits writes to the tunnels `talos-lab-host` and `talos-student-NN`, and to CNAME records named `teamNN`, `omniNN`, `kubeNN`, `shellNN`, `auth` and `pve` in the zone. Tunnel and record IDs come only from exact-name lookups. A hostname holding anything other than a tunnel CNAME is refused. `host up`, `host down`, `seats create` and `seats delete` compare every other tunnel and DNS record before and after, and fail on any difference.
 
+The access layer may write only the tunnel `talos-lab-access`, the CNAME `ssh`, and the Access application and service token named `talos-lab-access`. The application must be self-hosted on `ssh.<zone>`. Deletes take only IDs from exact-name lookups. `access up` and `access down` compare every other tunnel, DNS record, Access application and service token before and after. The host layer's own checks treat the access tunnel as someone else's, so `host down` runs while access is up.
+
 **Omni calls.** A seat's Omni is reached only through `seat_omnictl`, with that seat's service account key, over an SSH forward to its container.
 
 **Runs.** `flock` on `.lab/lock` prevents concurrent runs. Each `./lab` invocation loads `lab` and `lib/` fresh, so do not edit them during a multi-command sequence.
@@ -104,6 +111,14 @@ These guests are only started, stopped or deleted when their ID and name both ma
 ## How the layers work
 
 **Proxmox.** An unattended 9.x install in a libvirt VM with 24 GB RAM, 8 vCPUs and a sparse 200 GB disk. The answer file installs the lab SSH public key for root, and the host key is recorded on first contact after the install. It has its own libvirt network `talos-lab`, bridge `virbr-talos`, subnet `10.77.0.0/24` and storage pool. ufw drops forwarded traffic by default, so the layer adds rules for that bridge only and removes them on teardown.
+
+**Access.** `./lab access up` makes the path to a site host's SSH:
+- the tunnel `talos-lab-access`, whose only route is `ssh.<zone>` to `ssh://localhost:22`;
+- the service token `talos-lab-access`;
+- the self-hosted Access application `talos-lab-access` on `ssh.<zone>`, whose only policy is Service Auth for that token;
+- `.lab/access/bootstrap.sh`, which someone runs as root on the site host. It adds the access public key to root, installs openssh-server and curl when missing, downloads the pinned `cloudflared` and checks its SHA-256, runs it as `talos-access` from `/usr/local/lib/talos-access` with the connector token in `/etc/talos-access`, and prints the host's ed25519 key fingerprint.
+
+`./lab access verify SHA256:...` connects through `cloudflared access ssh` with the service token and records the host key only if it matches that fingerprint. Later calls check it strictly. `./lab access down` has the host remove its connector, unit and our key 5 seconds later, then deletes the application, token, record and tunnel.
 
 **Host.** The host layer prepares the Proxmox host:
 - It disables the enterprise apt sources, installs dnsmasq, and loads the WireGuard module.
@@ -199,7 +214,11 @@ It runs three systemd services:
 - The `preStop` sleep on `hello` keeps a terminating pod serving until it leaves the endpoints, which prevents failed requests during a rollout.
 - Cloudflare negative DNS responses last 30 minutes for this zone type. A lookup that happens before a record exists can cause "not found" for that long, so `lab_public_curl` resolves through a public resolver, and seats are created before anyone looks up their names.
 - `cf` writes a `.cloudflare/` cache containing account details into the working directory, and it is git-ignored.
+- `cloudflared access ssh` reads the service token from `TUNNEL_SERVICE_TOKEN_ID` and `TUNNEL_SERVICE_TOKEN_SECRET`, so the secret stays off the command line. Access asks for a browser login unless the policy's decision is Service Auth (`non_identity`). With only that policy, a request without the token, or with a wrong one, gets 403 before it reaches the tunnel. The service token's secret is shown only when it is created, so `access up` replaces a token whose secret is not in `.lab/access/`.
+- `ssh -S` replaces an earlier `-o ControlPath`, so a seat's Omni forward keeps its own control socket while other SSH calls share the access connection.
+- A new SSH connection through Cloudflare Access takes a few seconds, against a fraction of a second over a shared connection.
 - In `jq`, `false // x` returns `x`. Compare booleans explicitly when `false` is a meaningful value.
+- A `$(...)` subshell that calls `lab_on_exit` sets its own EXIT trap and holds a copy of the parent's hooks, so each hook records the process that registered it and runs only when that process exits. Otherwise the first `seat_omnictl` in a subshell would close the run's shared access connection.
 
 ## Looking at the guide panel locally
 
@@ -207,9 +226,9 @@ Run the pinned code-server from `.lab/host/bin/code-server.tar.gz` on `127.0.0.1
 
 ## Network requirements on a new site
 
-- A Proxmox VE 9 host with root SSH, or a Debian 13 VM to install it on.
+- A Proxmox VE 9 host with root SSH, or a Debian 13 VM to install it on. `access up` and the site host's `bootstrap.sh` give root SSH through Cloudflare when there is no VPN.
 - An upstream IPv4 nameserver first in the host's `/etc/resolv.conf`. Seats get it over DHCP, so a loopback resolver such as systemd-resolved's `127.0.0.53` fails `host up`.
-- Outbound TCP 443, outbound UDP and TCP 7844 for `cloudflared`, which has no alternative port, outbound UDP 123 to `time.cloudflare.com` for Talos, and outbound TCP 80 to the Debian and Proxmox package mirrors, which apt uses over HTTP.
+- Outbound TCP 443, outbound UDP and TCP 7844 for `cloudflared`, which has no alternative port, outbound UDP 123 to `time.cloudflare.com` for Talos, and outbound TCP 80 to the Debian and Proxmox package mirrors, which apt uses over HTTP. The bootstrap downloads `cloudflared` from `github.com`, which redirects to `release-assets.githubusercontent.com`.
 - KVM inside the Proxmox host, meaning the `vmx` or `svm` flag and `/dev/kvm`, when Proxmox itself runs as a VM.
 - Per seat, about 9 GB of RAM and 6 vCPUs for the Talos VMs, about 1 GB for the Omni container, and about 1.5 GB for the workspace. Each seat's disks are thin: 96 GB of VM disks, of which Talos fills a few GB, plus 12 GB for the two containers.
 - Per seat, one download of about 370 MB from `factory.talos.dev` while students build their images, about 7.5 GB for 20 seats if they all do it at once. The image lands in `/var/lib/talos-lab/iso` on the host's root filesystem.

@@ -14,10 +14,14 @@ source "$LAB_ROOT/lib/rehearsal-layer.sh"
 source "$LAB_ROOT/lib/site-layer.sh"
 source "$LAB_ROOT/lib/failover-layer.sh"
 source "$LAB_ROOT/lib/upgrade-layer.sh"
+source "$LAB_ROOT/lib/access-layer.sh"
 
 usage() {
   cat >&2 <<'EOF'
-usage: lab proxmox up|verify|down
+usage: lab access up|down
+       lab access verify [host-key-fingerprint]
+       lab access ssh [command...]
+       lab proxmox up|verify|down
        lab host up|verify|down
        lab seats create <count>|delete
        lab seat <number> up|upgrade|reset|delete
@@ -29,6 +33,30 @@ EOF
 main() {
   (($# >= 2)) || usage
   case "$1" in
+    access)
+      case "$2" in
+        up)
+          (($# == 2)) || usage
+          lab_lock "$*"
+          access_up
+          ;;
+        verify)
+          (($# <= 3)) || usage
+          lab_lock "$*"
+          access_verify "${3:-}"
+          ;;
+        ssh)
+          shift 2
+          access_ssh "$@"
+          ;;
+        down)
+          (($# == 2)) || usage
+          lab_lock "$*"
+          access_down
+          ;;
+        *) usage ;;
+      esac
+      ;;
     proxmox)
       (($# == 2)) || usage
       lab_lock "$*"

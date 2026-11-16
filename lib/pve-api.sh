@@ -11,6 +11,48 @@ pve_load_target() {
       return 1
     }
   done
+  if [[ -n "${PVE_SSH_ACCESS:-}" ]]; then
+    pve_access_open || return 1
+  fi
+}
+
+pve_access_master() {
+  printf '%s/access/master' "$LAB_STATE"
+}
+
+pve_access_env() {
+  local cloudflared="$LAB_STATE/host/bin/cloudflared"
+  [[ -r "$PVE_SSH_ACCESS" ]] || {
+    fail "Cloudflare Access service token not readable at $PVE_SSH_ACCESS, run ./lab access up"
+    return 1
+  }
+  [[ -x "$cloudflared" ]] || {
+    fail "cloudflared is not at $cloudflared, run ./lab access up"
+    return 1
+  }
+  set -a
+  source "$PVE_SSH_ACCESS"
+  set +a
+}
+
+pve_access_open() {
+  local port
+  pve_access_env || return 1
+  [[ "$PVE_URL" =~ ^https://127\.0\.0\.1:([0-9]+)$ ]] || {
+    fail "PVE_URL is $PVE_URL, but with PVE_SSH_ACCESS set it must be https://127.0.0.1:<port>, the local end of the forward to the host's API"
+    return 1
+  }
+  port="${BASH_REMATCH[1]}"
+  mkdir -p "$LAB_STATE/access"
+  pve_ssh_forward_open "$(pve_access_master)" "127.0.0.1:$port:127.0.0.1:8006" || {
+    fail "could not reach $PVE_SSH through Cloudflare Access with a forward from 127.0.0.1:$port to its API"
+    return 1
+  }
+  lab_on_exit pve_access_close
+}
+
+pve_access_close() {
+  pve_ssh_forward_close "$(pve_access_master)"
 }
 
 pve_ssh_options() {
@@ -20,9 +62,17 @@ pve_ssh_options() {
     -o BatchMode=yes
     -o StrictHostKeyChecking=yes
     -o UserKnownHostsFile="$PVE_SSH_KNOWN_HOSTS"
-    -o ConnectTimeout=10
     -o ServerAliveInterval=15
   )
+  if [[ -n "${PVE_SSH_ACCESS:-}" ]]; then
+    PVE_SSH_OPTIONS+=(
+      -o ConnectTimeout=30
+      -o "ProxyCommand=$(printf '%q' "$LAB_STATE/host/bin/cloudflared") access ssh --hostname %h"
+      -o ControlPath="$(pve_access_master)"
+    )
+  else
+    PVE_SSH_OPTIONS+=(-o ConnectTimeout=10)
+  fi
 }
 
 pve_ssh() {

@@ -11,6 +11,8 @@ TARGETS=(
   api.cloudflare.com:443
   download.proxmox.com:80
   deb.debian.org:80
+  github.com:443
+  release-assets.githubusercontent.com:443
   region1.v2.argotunnel.com:7844
   region2.v2.argotunnel.com:7844
 )
