@@ -156,14 +156,20 @@ rehearsal_machines() {
 }
 
 rehearsal_render_template() {
-  local id
+  local talos_version="$1" kubernetes_version="$2" id
   cat <<EOF
 kind: Cluster
 name: $SEAT_CLUSTER
 kubernetes:
-  version: v$LAB_KUBERNETES_VERSION
+  version: v$kubernetes_version
 talos:
-  version: v$LAB_TALOS_VERSION
+  version: v$talos_version
+features:
+  diskEncryption: true
+patches:
+  - name: fast-node-failure
+    inline:
+$(sed 's/^/      /' "$LAB_ROOT/patches/fast-node-failure.yaml")
 ---
 kind: ControlPlane
 machines:
@@ -174,7 +180,9 @@ machines:
   - ${SEAT_MACHINE_IDS[1]}
   - ${SEAT_MACHINE_IDS[2]}
 EOF
-  for id in "${SEAT_MACHINE_IDS[@]}"; do
+  printf -- '---\nkind: Machine\nname: %s\npatches:\n  - name: fast-node-failure-controlplane\n    inline:\n' "${SEAT_MACHINE_IDS[0]}"
+  sed 's/^/      /' "$LAB_ROOT/patches/fast-node-failure-controlplane.yaml"
+  for id in "${SEAT_MACHINE_IDS[@]:1}"; do
     printf -- '---\nkind: Machine\nname: %s\n' "$id"
   done
 }
@@ -209,7 +217,7 @@ rehearsal_wait_nodes_ready() {
 
 rehearsal_cluster() {
   local template="$SEAT_STATE/cluster.yaml"
-  rehearsal_render_template >"$template"
+  rehearsal_render_template "$LAB_TALOS_VERSION" "$LAB_KUBERNETES_VERSION" >"$template"
   seat_omnictl cluster template validate -f "$template" >/dev/null || exit 1
   log "syncing cluster template for $SEAT_CLUSTER"
   LAB_OMNI_TIMEOUT=300 seat_omnictl cluster template sync -f "$template" >/dev/null || rehearsal_capture_failure "cluster template sync failed"
@@ -241,6 +249,7 @@ rehearsal_student_site() {
   site_verify
   rehearsal_student "publish the site" 'kubectl create secret generic cloudflared-token --from-literal=token="$(cat token.txt)" && kubectl apply -f manifests/cloudflared.yaml && kubectl rollout status deployment/cloudflared'
   rehearsal_tunnel_verify
+  rehearsal_student "keep replicas balanced" 'kubectl apply -f manifests/descheduler.yaml && kubectl -n kube-system rollout status deployment/descheduler'
 }
 
 rehearsal_tunnel_verify() {
@@ -261,11 +270,14 @@ rehearsal_tunnel_verify() {
 }
 
 rehearsal_guide_status() {
-  local expected="$1" output
+  local expected="$1" ids output
+  shift
+  ids="$(jq -cn '$ARGS.positional' --args "$@")"
   output="$(seat_workspace_run '/opt/talos-lab/code-server/lib/node "$(ls -d ~/.local/share/code-server/extensions/talos-lab.lab-guide-*/ | tail -1)status.js"' 2>&1)" ||
     rehearsal_capture_failure "the lab guide status checks did not run in the workspace: $output"
-  jq -e --argjson expected "$expected" 'length > 0 and (to_entries | all(.value.done == $expected))' <<<"$output" >/dev/null 2>&1 ||
-    rehearsal_capture_failure "the lab guide status checks are not all done=$expected: $output"
+  jq -e --argjson expected "$expected" --argjson ids "$ids" \
+    'length > 0 and (to_entries | map(select(($ids | length) == 0 or (.key | IN($ids[])))) | length > 0 and all(.value.done == $expected))' <<<"$output" >/dev/null 2>&1 ||
+    rehearsal_capture_failure "the lab guide status checks $(if (($# > 0)); then printf '%s ' "$@"; else printf 'all '; fi)are not done=$expected: $output"
   log "lab guide status: $(jq -r 'to_entries | map("\(.key) \(.value.text)") | join("; ")' <<<"$output")"
 }
 
@@ -275,7 +287,8 @@ seat_up() {
   rehearsal_machines
   rehearsal_cluster
   rehearsal_student_site
-  rehearsal_guide_status true
+  rehearsal_guide_status true machines cluster nodes coredns site publish balance
+  rehearsal_guide_status false upgrade
   log "$SEAT_NAME rehearsal up: https://$SEAT_SITE_HOST"
 }
 

@@ -123,6 +123,30 @@ const CHECKS = {
     return { done: ready >= 2 && nodes >= 2, text: `${plural(ready, 'hello replica')} ready on ${plural(nodes, 'node')}` };
   },
 
+  async balance() {
+    if (!hasKubeconfig()) return { done: false, text: 'Run connect first' };
+    const { ready } = await readyPodNodes('kube-system', 'app=descheduler');
+    return { done: ready >= 1, text: ready >= 1 ? 'The descheduler is running' : 'The descheduler is not running yet' };
+  },
+
+  async upgrade(seat) {
+    if (!hasKubeconfig()) return { done: false, text: 'Run connect first' };
+    const target = seat.upgrade || {};
+    const nodes = await kubectlJson(['get', 'nodes']);
+    const versions = nodes.items.map((n) => ({
+      talos: ((/v([0-9.]+)/.exec(n.status.nodeInfo.osImage) || [])[1]) || 'unknown',
+      kubernetes: n.status.nodeInfo.kubeletVersion.replace(/^v/, ''),
+      ready: isReady(n),
+    }));
+    const talos = versions.filter((v) => v.talos === target.talos).length;
+    const kubernetes = versions.filter((v) => v.kubernetes === target.kubernetes).length;
+    const upgraded = versions.filter((v) => v.talos === target.talos && v.kubernetes === target.kubernetes && v.ready).length;
+    return {
+      done: versions.length >= MACHINES && upgraded === versions.length,
+      text: `${talos} of ${versions.length} nodes on Talos ${target.talos}, ${kubernetes} of ${versions.length} on Kubernetes ${target.kubernetes}`,
+    };
+  },
+
   async publish(seat) {
     if (!hasKubeconfig()) return { done: false, text: 'Run connect first' };
     const { ready } = await readyPodNodes('default', 'app=cloudflared');

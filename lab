@@ -13,13 +13,14 @@ source "$LAB_ROOT/lib/seats-layer.sh"
 source "$LAB_ROOT/lib/rehearsal-layer.sh"
 source "$LAB_ROOT/lib/site-layer.sh"
 source "$LAB_ROOT/lib/failover-layer.sh"
+source "$LAB_ROOT/lib/upgrade-layer.sh"
 
 usage() {
   cat >&2 <<'EOF'
 usage: lab proxmox up|verify|down
        lab host up|verify|down
        lab seats create <count>|delete
-       lab seat <number> up|reset
+       lab seat <number> up|upgrade|reset|delete
        lab seat <number> failover [worker-a|worker-b]
 EOF
   exit 2
@@ -73,9 +74,17 @@ main() {
           (($# == 3)) || usage
           seat_up "$2"
           ;;
+        upgrade)
+          (($# == 3)) || usage
+          seat_upgrade "$2"
+          ;;
         reset)
           (($# == 3)) || usage
           seat_reset "$2"
+          ;;
+        delete)
+          (($# == 3)) || usage
+          seat_remove "$2"
           ;;
         failover)
           (($# <= 4)) || usage

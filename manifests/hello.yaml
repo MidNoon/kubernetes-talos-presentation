@@ -200,3 +200,13 @@ spec:
   ports:
     - port: 80
       targetPort: 8080
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hello
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: hello

@@ -7,6 +7,8 @@ const status = require('./status');
 
 const VIEW_TYPE = 'labGuide';
 const TERMINAL_NAME = 'Lab';
+const WATCH_TERMINAL_NAME = 'Watch';
+const WATCH_COMMAND = /(^|\s)(--watch|-w)(\s|$)/m;
 const HOME = os.homedir();
 const README = path.join(HOME, 'README.md');
 const CONFIG_DIR = path.join(HOME, '.config', 'talos-lab');
@@ -97,11 +99,21 @@ function stopPolling() {
   pollTimer = undefined;
 }
 
+function liveTerminal(name) {
+  return vscode.window.terminals.find((t) => t.name === name && t.exitStatus === undefined);
+}
+
 function labTerminal() {
-  return (
-    vscode.window.terminals.find((t) => t.name === TERMINAL_NAME && t.exitStatus === undefined) ||
-    vscode.window.createTerminal({ name: TERMINAL_NAME, cwd: HOME })
-  );
+  return liveTerminal(TERMINAL_NAME) || vscode.window.createTerminal({ name: TERMINAL_NAME, cwd: HOME });
+}
+
+function watchTerminal() {
+  const existing = liveTerminal(WATCH_TERMINAL_NAME);
+  if (existing) {
+    existing.sendText('\u0003', false);
+    return existing;
+  }
+  return vscode.window.createTerminal({ name: WATCH_TERMINAL_NAME, cwd: HOME, location: { parentTerminal: labTerminal() } });
 }
 
 function saveProgress(progress) {
@@ -119,7 +131,7 @@ async function onMessage(message) {
       saveProgress(message.progress);
       break;
     case 'run': {
-      const terminal = labTerminal();
+      const terminal = WATCH_COMMAND.test(message.text) ? watchTerminal() : labTerminal();
       terminal.show(true);
       terminal.sendText(message.text.replace(/\s+$/, ''), true);
       setTimeout(poll, 4000);

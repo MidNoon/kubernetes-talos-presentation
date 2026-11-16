@@ -75,6 +75,7 @@ load_libs() {
   source "$LAB_ROOT/lib/rehearsal-layer.sh"
   source "$LAB_ROOT/lib/site-layer.sh"
   source "$LAB_ROOT/lib/failover-layer.sh"
+  source "$LAB_ROOT/lib/upgrade-layer.sh"
   LAB_STATE="$WORK/state"
   HOST_STATE="$LAB_STATE/host"
   LAB_SEATS_STATE="$LAB_STATE/seats"
@@ -392,8 +393,48 @@ test_guide_seat_info_carries_the_seat_links() {
   seat_use 3
   printf 'student03\tstudent03@zone.example\t%s\thash\tid\n' "$SECRET_PASSWORD" >"$HOST_STATE/users.tsv"
   info="$(seat_render_seat_info)"
-  jq -e '.seat == "03" and .email == "student03@zone.example" and .links.omni == "https://omni03.zone.example" and .links.proxmox == "https://pve.zone.example" and .links.site == "https://team03.zone.example"' <<<"$info" >/dev/null || return 1
+  jq -e '.seat == "03" and .email == "student03@zone.example" and .links.omni == "https://omni03.zone.example" and .links.proxmox == "https://pve.zone.example" and .links.site == "https://team03.zone.example" and .upgrade.talos == "1.14.6" and .upgrade.kubernetes == "1.37.2"' <<<"$info" >/dev/null || return 1
   [[ "$(jq -r .password <<<"$info" | wc -c)" -gt 1 ]]
+}
+
+guide_yaml_blocks() {
+  local block="" inside=false line
+  while IFS= read -r line; do
+    if [[ "$inside" == true && "$line" == '```' ]]; then
+      printf '%s\0' "$block"
+      inside=false
+      block=""
+    elif [[ "$inside" == true ]]; then
+      block+="$line"$'\n'
+    elif [[ "$line" == '```yaml' ]]; then
+      inside=true
+    fi
+  done <"$LAB_ROOT/docs/hands-on.md"
+}
+test_guide_shows_each_patch_the_rehearsal_applies() {
+  local patch block found
+  for patch in "$LAB_ROOT"/patches/*.yaml; do
+    found=false
+    while IFS= read -r -d '' block; do
+      [[ "$block" == "$(<"$patch")"$'\n' ]] && found=true
+    done < <(guide_yaml_blocks)
+    [[ "$found" == true ]] || return 1
+  done
+}
+
+test_upgrade_reads_each_node_version_and_state() {
+  local states
+  lab_kubectl() {
+    printf '%s\n' '{"items":[
+      {"metadata":{"name":"talos-b"},"spec":{"unschedulable":true},"status":{"nodeInfo":{"osImage":"Talos (v1.14.6)","kubeletVersion":"v1.37.1"},"conditions":[{"type":"Ready","status":"False"}]}},
+      {"metadata":{"name":"talos-a"},"spec":{},"status":{"nodeInfo":{"osImage":"Talos (v1.14.5)","kubeletVersion":"v1.37.1"},"conditions":[{"type":"Ready","status":"True"}]}}]}'
+  }
+  states="$(upgrade_node_states)"
+  [[ "$states" == "talos-a talos=1.14.5 kubelet=1.37.1 ready=True schedulable"$'\n'"talos-b talos=1.14.6 kubelet=1.37.1 ready=False cordoned" ]]
+}
+test_upgrade_reports_an_unreadable_cluster() {
+  lab_kubectl() { return 1; }
+  [[ "$(upgrade_node_states)" == unreadable ]]
 }
 
 passed=0

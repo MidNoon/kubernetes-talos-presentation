@@ -6,7 +6,7 @@ Automation and teaching material for a university session. Each student gets a s
 - a Proxmox pool and a storage of their own for install images;
 - a browser workspace with the tools and files, and the guide as a step-by-step panel.
 
-Students build a Talos install image in their Omni, have Proxmox download it, make a VM template from it and clone three Talos VMs, watch them join their Omni, build a cluster of 1 control plane and 2 workers, publish a site through a Cloudflare Tunnel, and watch it survive losing a worker. They need only a browser, and one email and password sign them in everywhere.
+Students build a Talos install image in their Omni, have Proxmox download it, make a VM template from it and clone three Talos VMs, watch them join their Omni, build a cluster of 1 control plane and 2 workers, publish a site through a Cloudflare Tunnel, and watch it survive losing a worker and a rolling upgrade of every machine. They need only a browser, and one email and password sign them in everywhere.
 
 `./lab` builds the host and the seats, and rehearses a student's run on any seat so the whole flow can be built, broken and torn down repeatedly. `docs/hands-on.md` is the student version of the same flow.
 
@@ -18,38 +18,42 @@ Students build a Talos install image in their Omni, have Proxmox download it, ma
 ./lab seats create <count>|delete            # per-seat network, Omni, ISO storage, workspace, logins, site tunnel
 ./lab seat <n> up                            # rehearse a student's run: image, template, clones, cluster, the guide's commands
 ./lab seat <n> failover [worker-a|worker-b]  # hard-stop a worker under a public probe
+./lab seat <n> upgrade                       # upgrade Talos, then Kubernetes, under a public probe
 ./lab seat <n> reset                         # remove every cluster, machine, VM, image and preset, keep the seat
+./lab seat <n> delete                        # remove one seat, leave the others running
 
 tools/site-check.sh [host:port ...]          # KVM, gateway, DNS and egress checks on a candidate site host
 tests/guards.sh                              # stubbed guard tests, no real services, needs node and unzip
 shellcheck -s bash -x -e SC1090,SC1091,SC2034,SC2154,SC2016,SC2317,SC2024,SC2029 lab lib/*.sh tests/guards.sh tools/site-check.sh
 ```
 
-A full rehearsal is `./lab proxmox up`, `./lab host up`, `./lab seats create 1`, `./lab seat 1 up`, `./lab seat 1 failover`, `./lab seat 1 reset`, `./lab seats delete`, `./lab host down`. Above Proxmox it takes about 15 minutes:
+A full rehearsal is `./lab proxmox up`, `./lab host up`, `./lab seats create 1`, `./lab seat 1 up`, `./lab seat 1 failover`, `./lab seat 1 upgrade`, `./lab seat 1 reset`, `./lab seats delete`, `./lab host down`. Above Proxmox it takes about 30 minutes:
 
 | Step | Time |
 | --- | --- |
 | `host up` | about 30 seconds |
 | `seats create 1` | under a minute |
 | `seat 1 up` | 5 to 8 minutes, including the image download |
-| `seat 1 failover` | about 4.5 minutes, including the 120 second image wait |
+| `seat 1 failover` | about 3.5 minutes, including the 120 second image wait |
+| `seat 1 upgrade` | about 10 minutes: Talos 5.5, Kubernetes 3.3 |
 | `seat 1 reset` | under 2 minutes |
 | `seats delete` and `host down` | under a minute |
 
-Running `seats create` again leaves running seats untouched, because a seat's Omni restarts only when its configuration changed.
+Running `seats create` again leaves running seats untouched, because a seat's Omni restarts only when its configuration changed. A seat's workspace restarts when its unit, password or guide extension changed, which closes the student's terminals. To rehearse while someone uses seat 1, run `./lab seats create 2` and rehearse on seat 2, then `./lab seat 2 delete`.
 
 ## Layout
 
 - `lab` dispatches commands and takes the run lock.
-- `lib/common.sh` has the pinned Talos and Kubernetes versions, logging, config loading, the lock, exit hooks and `lab_public_curl`.
+- `lib/common.sh` has the Talos and Kubernetes versions a cluster starts on and is upgraded to, logging, config loading, the lock, exit hooks and `lab_public_curl`.
 - `lib/pve-api.sh` is the Proxmox REST client, root SSH and SSH forwards, and the guest name guards.
 - `lib/cloudflare.sh` is the only path to `cf`, through `cf_query` and its allowlist, plus tunnel and DNS primitives.
 - `lib/proxmox-layer.sh` builds the nested Proxmox VM with libvirt.
 - `lib/host-layer.sh` builds the shared services on the Proxmox host.
 - `lib/seats-layer.sh` builds and removes seats. `seat_omnictl` is the only path to a seat's Omni.
-- `lib/rehearsal-layer.sh`, `lib/site-layer.sh` and `lib/failover-layer.sh` play a student's run on a seat.
-- `manifests/` holds the Kubernetes manifests students apply unchanged.
-- `workspace/lab-guide/` is the code-server extension behind the workspace's **Lab guide** tab. `extension.js` builds the panel from `~/README.md`, sends commands to the `Lab` terminal, copies values and opens links. `status.js` holds the status checks, and `node status.js` prints them all as JSON. `media/` holds the panel's script, styles and icon.
+- `lib/rehearsal-layer.sh`, `lib/site-layer.sh`, `lib/failover-layer.sh` and `lib/upgrade-layer.sh` play a student's run on a seat. The site layer holds the public probe, timeline and summary that failover and upgrade share.
+- `manifests/` holds the Kubernetes manifests students apply unchanged: the site, the tunnel connectors, and the descheduler pinned by digest.
+- `patches/` holds the Talos config patches students paste into Omni when they create the cluster: one for every machine, one for the control plane machine. The rehearsal applies the same files, and a guard test keeps the guide's copies identical.
+- `workspace/lab-guide/` is the code-server extension behind the workspace's **Lab guide** tab. `extension.js` builds the panel from `~/README.md`, sends commands to the `Lab` terminal, copies values and opens links. `status.js` holds the status checks, and `node status.js` prints them all as JSON. A command with `--watch` or `-w` runs in its own `Watch` terminal beside `Lab`. A step stays ticked once its check passes, even if the check later fails, for example during the failover. `media/` holds the panel's script, styles and icon.
 - `docker/pve-assistant/` builds the image that prepares the unattended Proxmox installer.
 - `tools/site-check.sh` runs standalone on a Proxmox host or desktop at a candidate site, with no dependency on the rest of the repo.
 
@@ -126,20 +130,22 @@ It runs two systemd services:
 - It creates the media preset `talos-lab` in the seat's Omni with the pinned Talos version and the guest agent extension, and builds the Image Factory ISO link the wizard's **Copy link** gives a student.
 - It signs in to Proxmox as the seat's student. With that session it has Proxmox download the ISO into `seatNN-iso`, creates `seatNN-template` with the guide's settings and converts it to a template, and clones the template into the seat's three VMs. The lab token then sets the clones' SMBIOS UUIDs to the seat's fixed machine IDs.
 - It boots them one at a time and waits for each to register.
-- It syncs a cluster template named `seatNN`, which stands in for the student's clicks in Omni, and waits for Ready.
+- It syncs a cluster template named `seatNN`, which stands in for the student's clicks in Omni, and waits for Ready. The template matches the guide: Omni's default versions, Encrypt Disks on, the cluster patch, and the control plane patch on the first machine.
 - It fetches its own 24 hour service-account kubeconfig, which reaches the cluster through `kubeNN`, for verification. `lab_kubectl` uses that kubeconfig, so use it instead of bare `kubectl`.
-- It runs the guide's commands as `student` inside the workspace: `connect`, the CoreDNS restart (repeated until the replicas are on two nodes), applying `manifests/hello.yaml`, the Secret from `token.txt`, and applying `manifests/cloudflared.yaml`.
+- It runs the guide's commands as `student` inside the workspace: `connect`, the CoreDNS restart (repeated until the replicas are on two nodes), applying `manifests/hello.yaml`, the Secret from `token.txt`, applying `manifests/cloudflared.yaml`, and applying `manifests/descheduler.yaml`.
 - From outside, it verifies that both replicas answer through the API proxy and at `https://teamNN.<zone>`.
-- It runs the guide's status checks inside the workspace before anything else, when every check must be waiting, and after publishing, when every check must be done.
+- It runs the guide's status checks inside the workspace before anything else, when every check must be waiting, and at the end, when every check but `upgrade` must be done.
 
 `./lab seat <n> reset` returns a seat to the state `seats create` left:
 - It deletes every cluster in the seat's Omni while the machines are online.
 - It deletes every VM in pool `seatNN`, templates last, every ISO in `seatNN-iso`, every installation media preset, and every link.
 - It removes the workspace kubeconfig and the guide's progress.
 
-**Site.** CoreDNS is restarted first, because at bootstrap both replicas land on the one node that is already Ready. `manifests/hello.yaml` is stock nginx configured by a ConfigMap, with a page that polls `/whoami` every second.
+**Site.** CoreDNS is restarted first, because at bootstrap both replicas land on the one node that is already Ready. `manifests/hello.yaml` is stock nginx configured by a ConfigMap, with a page that polls `/whoami` every second. `hello` and `cloudflared` each have a PodDisruptionBudget of one, and the descheduler evicts a replica that breaks its spread every 15 seconds.
 
-**Failover.** Waits until the newest pod is 120 seconds old, then hard-stops a worker while probing the public URL once a second. It records the timeline, restarts the worker, and rolls both deployments to rebalance. Runs are saved under the seat's `failover/`.
+**Failover.** Waits until the newest pod is 120 seconds old, then hard-stops a worker while probing the public URL once a second. It records the timeline, restarts the worker, and waits for the descheduler to spread both deployments again. Runs are saved under the seat's `failover/`.
+
+**Upgrade.** `./lab seat <n> upgrade` needs a cluster on the start versions. Under the same probe, it syncs the cluster template with the newer Talos, waits until every node runs it, Ready and schedulable, and waits for the spread. Then it does the same for Kubernetes and runs every guide check, which must all be done. It records each node's version, readiness and cordon in the timeline. Runs are saved under the seat's `upgrade/`.
 
 ## Platform behavior the design depends on
 
@@ -161,7 +167,11 @@ It runs two systemd services:
 - The Proxmox create wizard defaults to SeaBIOS, the i440fx machine, CPU type `x86-64-v2-AES`, VirtIO SCSI single, a 32 GB disk, 2 GB with ballooning, and a firewalled VirtIO NIC. Talos runs on those defaults once the controller, guest agent, cores, memory, ballooning and bridge are changed as the guide lists. IO thread turns off by itself when the controller is VirtIO SCSI before the Disks tab is reached.
 - A Proxmox task's status is readable by its owner or with `Sys.Audit` on the node, so the rehearsal waits for a student's download, VM creation and clones through the student's session.
 - After the Dex login, Omni's Authenticate UI Access page registers and confirms a browser key by itself, then loads the main view. Its **Log In** button stays enabled during that load. A click there registers a second key, fails to confirm it because the token has left the URL, and stores it anyway, because the confirm step reports the earlier success. Omni then answers 401 to that key and the browser returns to the sign-in page. The guide tells students to leave the button alone.
-- Omni's cluster wizard defaults to Kubernetes 1.37.1, so students select the pinned version by hand.
+- Omni's media wizard recommends Talos 1.14.5 and its cluster wizard defaults to Talos 1.14.5 and Kubernetes 1.37.1. Omni also offers Talos 1.14.6 and Kubernetes 1.37.2, so students keep the defaults and upgrade to the newer patches later.
+- Talos 1.14 configures the kubelet and the controller manager in separate documents, `KubeletConfig` and `KubeControllerManagerConfig`, and Omni generates them. A patch that sets `.machine.kubelet` or `.cluster.controllerManager` fails with `already set in v1alpha1 config`, and the machines stay in maintenance with no error in the cluster status. Only control plane machines get a `KubeControllerManagerConfig`, so that patch goes on the control plane machine.
+- Omni's Create Cluster ticks Encrypt Disks by default, and it cannot change after creation.
+- The Talos console dashboard shows the machine's UUID at the top left. It equals the VM's SMBIOS UUID and the machine ID in Omni, which is how students tell machines apart.
+- Omni upgrades Talos one machine at a time, control plane first. Talos cordons and drains each machine before it reboots, so its pods move first. The control plane's reboot leaves `kubectl` unanswered for about two minutes. The rehearsal's Talos upgrade took 5.5 minutes, and Kubernetes took 3.3 minutes without reboots. 3 of 452 probe requests failed across both.
 - Omni's Operator role cannot read identities. Checks made as the workspace's Operator service account list clusters instead.
 - A Proxmox clone gets a new SMBIOS UUID and MAC address, so three clones of one template register as three distinct Talos machines.
 - A Talos control plane runs this lab's 3-node cluster in 3 GB, so all three VMs share the template's size.
@@ -174,12 +184,12 @@ It runs two systemd services:
 - Talos machines register with their seat's Omni about 30 seconds after boot, and a 3-machine cluster is Ready about 4 minutes after the template sync.
 - Deleting a cluster while its machines are online returns them to maintenance, so reset deletes the cluster before stopping VMs. When every machine is disconnected, Omni will not remove the last control plane while its cluster exists.
 - Omni takes about 4.5 minutes to show a stopped machine as disconnected, so demos and timing use Kubernetes' view.
-- A stopped node's Ready condition becomes `Unknown`, not `False`, after about 50 seconds.
-- During those 50 seconds the Service still routes to the dead pod, so some requests fail. Failures stop once the node is marked down. Expect 10 to 13 failures from a once-a-second probe with a 3 second timeout.
+- A stopped node's Ready condition becomes `Unknown`, not `False`. With the guide's patches, a 20 second node lease and a 20 second `node-monitor-grace-period`, that takes about 21 seconds instead of about 50.
+- Until then the Service still routes to the dead pod, so some requests fail. Failures stop once the node is marked down. The rehearsal saw 3 failures from a once-a-second probe with a 3 second timeout, against 10 to 13 without the patches.
 - Hard-stopping a node within about a minute of pulling an image can leave a damaged copy on its disk. It shows as `exec format error` and `CrashLoopBackOff` once the node returns. Deleting the pod does not help, because the damaged image stays on that node. `kubectl set image` to a different version pulls clean layers.
-- `tolerationSeconds: 30` brings replacements up about 80 seconds after the stop. The Kubernetes default is 300 seconds.
+- `tolerationSeconds: 30` brings replacements up about 60 seconds after the stop. The Kubernetes default is 300 seconds.
 - `whenUnsatisfiable: DoNotSchedule` with `nodeTaintsPolicy: Honor` spreads replicas strictly. The replacement can still schedule on the surviving worker, because the dead node's untolerated taint removes it from the calculation.
-- Pods do not move back when a worker returns. `kubectl rollout restart` rebalances them, and `matchLabelKeys: pod-template-hash` makes that placement clean.
+- Pods do not move back when a worker returns. The descheduler's `RemovePodsViolatingTopologySpreadConstraint` evicts one replica within its 15 second interval, about 20 seconds after the node is Ready, and the PodDisruptionBudget keeps it to one replica at a time. A cordoned or tainted node does not count toward the spread, so the descheduler leaves replicas alone while a node is down or draining.
 - `keepalive_timeout 0` in nginx closes each connection, so `cloudflared` reconnects through the Service and traffic reaches both replicas.
 - The `preStop` sleep on `hello` keeps a terminating pod serving until it leaves the endpoints, which prevents failed requests during a rollout.
 - Cloudflare negative DNS responses last 30 minutes for this zone type. A lookup that happens before a record exists can cause "not found" for that long, so `lab_public_curl` resolves through a public resolver, and seats are created before anyone looks up their names.

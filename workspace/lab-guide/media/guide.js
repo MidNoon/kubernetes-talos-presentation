@@ -4,6 +4,7 @@
   const steps = guide.steps;
   let progress = { current: 0, done: [] };
   let statuses = {};
+  let loaded = false;
   let toastTimer;
 
   function el(tag, props, children) {
@@ -20,7 +21,7 @@
   }
 
   function isDone(step) {
-    return progress.done.includes(step.id) || Boolean(step.check && statuses[step.check] && statuses[step.check].done);
+    return progress.done.includes(step.id);
   }
 
   function save() {
@@ -175,6 +176,15 @@
     go(Math.min(progress.current + 1, steps.length - 1));
   }
 
+  function absorbStatuses() {
+    if (!loaded) return;
+    const passed = steps.filter((s) => s.check && statuses[s.check] && statuses[s.check].done && !progress.done.includes(s.id));
+    if (passed.length) {
+      progress.done.push(...passed.map((s) => s.id));
+      save();
+    }
+  }
+
   function refreshStatus() {
     renderHeader();
     renderNav();
@@ -193,9 +203,12 @@
       progress = { current: 0, done: [], ...message.progress };
       progress.current = Math.max(0, Math.min(progress.current, steps.length - 1));
       progress.done = progress.done.filter((id) => steps.some((s) => s.id === id));
+      loaded = true;
+      absorbStatuses();
       render();
     } else if (message.type === 'status') {
       statuses = message.results;
+      absorbStatuses();
       refreshStatus();
     } else if (message.type === 'copied') {
       toast(message.label);

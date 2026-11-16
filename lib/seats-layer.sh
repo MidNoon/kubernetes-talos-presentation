@@ -442,7 +442,9 @@ seat_render_seat_info() {
     --arg omni "https://$SEAT_OMNI_HOST" \
     --arg proxmox "https://$(host_name pve)" \
     --arg site "https://$SEAT_SITE_HOST" \
-    '{seat: $seat, email: $email, password: $password, links: {omni: $omni, proxmox: $proxmox, site: $site}}'
+    --arg talos "$LAB_TALOS_UPGRADE_VERSION" \
+    --arg kubernetes "$LAB_KUBERNETES_UPGRADE_VERSION" \
+    '{seat: $seat, email: $email, password: $password, links: {omni: $omni, proxmox: $proxmox, site: $site}, upgrade: {talos: $talos, kubernetes: $kubernetes}}'
 }
 
 seat_guide_vsix() {
@@ -496,7 +498,7 @@ seat_ensure_workspace() {
   seat_render_vscode_settings | pve_ssh "cat >$stage/settings.json"
   seat_render_readme | pve_ssh "cat >$stage/README.md"
   seat_render_seat_info | pve_ssh "cat >$stage/seat.json"
-  pve_scp "$LAB_ROOT/manifests/hello.yaml" "$LAB_ROOT/manifests/cloudflared.yaml" "$PVE_SSH:$stage/manifests/"
+  pve_scp "$LAB_ROOT"/manifests/*.yaml "$PVE_SSH:$stage/manifests/"
   pve_scp "$(seat_guide_vsix)" "$PVE_SSH:$stage/lab-guide.vsix"
   pve_scp "$SEAT_STATE/site-token" "$PVE_SSH:$stage/token.txt"
   restarted="$(pve_remote CT="$SEAT_WS_ID" STAGE="$stage" WS_USER="$SEAT_WS_USER" <<'EOF'
@@ -737,4 +739,19 @@ seats_delete() {
   after="$(cf_snapshot_others)" || exit 1
   [[ "$before" == "$after" ]] || die "other Cloudflare resources changed while deleting seats. Before: $before. After: $after"
   log "all seats removed, other tunnels and DNS records unchanged"
+}
+
+seat_remove() {
+  local before after leftovers
+  host_load_config
+  seat_use "$1"
+  before="$(cf_snapshot_others)" || exit 1
+  seat_delete "$SEAT"
+  host_install_dex
+  host_sync_tunnel
+  leftovers="$(seat_remote_numbers)" || die "could not list seats after removing $SEAT_NAME"
+  ! grep -qxF "$SEAT" <<<"$leftovers" || die "$SEAT_NAME left resources behind"
+  after="$(cf_snapshot_others)" || exit 1
+  [[ "$before" == "$after" ]] || die "other Cloudflare resources changed while removing $SEAT_NAME. Before: $before. After: $after"
+  log "$SEAT_NAME removed, other seats, tunnels and DNS records unchanged"
 }

@@ -76,3 +76,13 @@ spec:
               memory: 32Mi
             limits:
               memory: 128Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cloudflared
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: cloudflared
