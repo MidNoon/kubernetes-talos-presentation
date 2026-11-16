@@ -207,6 +207,7 @@ Run the pinned code-server from `.lab/host/bin/code-server.tar.gz` on `127.0.0.1
 ## Network requirements on a new site
 
 - A Proxmox VE 9 host with root SSH, or a Debian 13 VM to install it on.
+- An upstream IPv4 nameserver first in the host's `/etc/resolv.conf`. Seats get it over DHCP, so a loopback resolver such as systemd-resolved's `127.0.0.53` fails `host up`.
 - Outbound TCP 443, outbound UDP and TCP 7844 for `cloudflared`, which has no alternative port, outbound UDP 123 to `time.cloudflare.com` for Talos, and outbound TCP 80 to the Debian and Proxmox package mirrors, which apt uses over HTTP.
 - KVM inside the Proxmox host, meaning the `vmx` or `svm` flag and `/dev/kvm`, when Proxmox itself runs as a VM.
 - Per seat, about 9 GB of RAM and 6 vCPUs for the Talos VMs, about 1 GB for the Omni container, and about 1.5 GB for the workspace. Each seat's disks are thin: 96 GB of VM disks, of which Talos fills a few GB, plus 12 GB for the two containers.

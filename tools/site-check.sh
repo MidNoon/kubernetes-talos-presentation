@@ -42,10 +42,16 @@ check_virt() {
 }
 
 check_network() {
-  local route gateway nameservers
+  local route gateway nameservers resolver
   route="$(ip -4 route show default)"
   nameservers="$(awk '/^nameserver/ {print $2}' /etc/resolv.conf | paste -sd ' ')"
   report INFO "nameservers" "${nameservers:-none}"
+  resolver="$(awk '$1 == "nameserver" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $2; exit}' /etc/resolv.conf)"
+  case "$resolver" in
+    "") report FAIL "seat resolver" "no IPv4 nameserver in /etc/resolv.conf" ;;
+    127.*) report FAIL "seat resolver" "$resolver is loopback, seats need an upstream IPv4 nameserver first" ;;
+    *) report PASS "seat resolver" "$resolver" ;;
+  esac
   if [[ -z "$route" ]]; then
     report FAIL "default route" "none"
     return
