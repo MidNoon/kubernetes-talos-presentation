@@ -228,6 +228,8 @@ fi
 systemctl disable --now dnsmasq.service >/dev/null 2>&1 || true
 modprobe wireguard
 printf 'wireguard\n' >/etc/modules-load.d/talos-lab.conf
+printf 'net.ipv4.ip_forward = 1\n' >/etc/sysctl.d/talos-lab.conf
+sysctl -q -w net.ipv4.ip_forward=1
 if ! pvesh get "/cluster/sdn/zones/$ZONE" >/dev/null 2>&1; then
   pvesh create /cluster/sdn/zones --zone "$ZONE" --type simple --dhcp dnsmasq --ipam pve >/dev/null
   pvesh set /cluster/sdn >/dev/null
@@ -243,7 +245,7 @@ EOF
   [[ -n "$dns" ]] || die "the Proxmox host has no IPv4 nameserver in /etc/resolv.conf: $(pve_ssh "grep nameserver /etc/resolv.conf" | paste -sd' ')"
   [[ "$dns" != 127.* ]] || die "the Proxmox host resolves through $dns, which seats cannot reach. Put an upstream IPv4 nameserver first in /etc/resolv.conf"
   printf '%s\n' "$dns" >"$HOST_STATE/host-dns"
-  log "host prepared: dnsmasq, wireguard module, SDN zone $HOST_SDN_ZONE, Debian container template"
+  log "host prepared: dnsmasq, wireguard module, IPv4 forwarding, SDN zone $HOST_SDN_ZONE, Debian container template"
 }
 
 host_ct_template() {
@@ -710,7 +712,7 @@ for service in $SERVICES; do
   rm -f "/etc/systemd/system/$service.service"
 done
 systemctl daemon-reload
-rm -rf "$BIN" "$ETC" /etc/modules-load.d/talos-lab.conf
+rm -rf "$BIN" "$ETC" /etc/modules-load.d/talos-lab.conf /etc/sysctl.d/talos-lab.conf
 if pvesh get "/cluster/sdn/zones/$ZONE" >/dev/null 2>&1; then
   pvesh delete "/cluster/sdn/zones/$ZONE" >/dev/null
   pvesh set /cluster/sdn >/dev/null

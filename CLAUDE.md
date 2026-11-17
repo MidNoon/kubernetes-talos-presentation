@@ -128,7 +128,7 @@ The access layer may write only the tunnel `talos-lab-access`, the CNAME `ssh`, 
 `./lab access target` creates `talos-lab@pve` and its token over SSH, adds the directory storage `lab-disks` at `/var/lib/lab-disks` for VM disks and container root filesystems, so students never see the host's `local` storage, and reads the pin from the live web interface on 8006.
 
 **Host.** The host layer prepares the Proxmox host:
-- It disables the enterprise apt sources, installs dnsmasq, and loads the WireGuard module.
+- It disables the enterprise apt sources, installs dnsmasq, loads the WireGuard module, and turns on IPv4 forwarding through `/etc/sysctl.d/talos-lab.conf`.
 - It creates the SDN simple zone `talab` with DHCP, and downloads the Debian 13 container template.
 - It puts Omni, the five `omnictl` builds, Dex, cloudflared, `kubectl` and code-server in `/usr/local/lib/talos-lab`. Each is pinned by version and checksum, downloaded locally, and uploaded only when it differs.
 - It adds the roles `TalosLabMedia` (`Datastore.Audit` and `Datastore.AllocateTemplate`) and `TalosLabDownload` (`Sys.AccessNetwork`), and the directory `/var/lib/talos-lab/iso` for the seats' install image storages.
@@ -227,6 +227,7 @@ It runs three systemd services:
 - In `jq`, `false // x` returns `x`. Compare booleans explicitly when `false` is a meaningful value.
 - Proxmox VE 9 goes on Debian 13 as the Proxmox wiki describes: hostname resolving to the real address in `/etc/hosts`, the no-subscription repository with the trixie keyring, `proxmox-default-kernel` and a reboot, then `proxmox-ve postfix open-iscsi chrony`, then removing the Debian kernels and `os-prober`. The install adds `pve-enterprise.sources`, which fails without a subscription until it is disabled.
 - On Proxmox, ifupdown2 runs `dhclient` for an `inet dhcp` interface, and Debian's AppArmor profile for `dhclient` blocks its unix sockets under the Proxmox kernel, so it exits at once. Disabling that profile through `/etc/apparmor.d/disable/sbin.dhclient` fixes it. Until then, an address left by NetworkManager hides the problem until its lease runs out.
+- Proxmox VE installed from its ISO forwards IPv4, and Proxmox VE installed on Debian does not. An SDN vnet's `ip-forward on` covers only the vnet's own interface, so without `net.ipv4.ip_forward` a seat's packets leave through SNAT and the replies coming in on the uplink are dropped.
 - `pvenetcommit` moves a pending `/etc/network/interfaces.new` over `/etc/network/interfaces` at boot, so a hand edit of `interfaces` is lost when a pending file exists.
 - Debian's NetworkManager lets go of interfaces listed in `/etc/network/interfaces` because of `[ifupdown] managed=false`. On a Debian site host with a desktop, NetworkManager is masked rather than removed, because removing it removes the `gnome` metapackage.
 - A `$(...)` subshell that calls `lab_on_exit` sets its own EXIT trap and holds a copy of the parent's hooks, so each hook records the process that registered it and runs only when that process exits. Otherwise the first `seat_omnictl` in a subshell would close the run's shared access connection.
