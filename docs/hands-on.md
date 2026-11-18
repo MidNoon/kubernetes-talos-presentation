@@ -12,7 +12,7 @@ Your instructor gives you a card for your seat, number `NN`, with an email addre
 | --- | --- |
 | `https://shellNN.<class domain>` | Your workspace: this guide, your files and a terminal, in the browser |
 | `https://omniNN.<class domain>` | Your own Omni, where your machines and cluster live |
-| `https://pve.<class domain>` | Proxmox, where your virtual machines run |
+| `https://pve<host>.<class domain>` | Proxmox, where your virtual machines run |
 | `https://teamNN.<class domain>` | Your website, once you publish it |
 
 A browser is all you need. Keep each link open in its own tab.

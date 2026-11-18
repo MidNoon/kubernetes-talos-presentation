@@ -62,7 +62,7 @@ reset_fake() {
   mkdir -p "$FAKE"
   printf '[{"id":"home-tunnel-id","name":"home-tunnel","deleted_at":null}]\n' >"$FAKE/cf-tunnels"
   printf '[{"id":"other-rec","name":"other.zone.example","type":"A","content":"192.0.2.1"},{"id":"www-rec","name":"www.zone.example","type":"CNAME","content":"home-tunnel-id.cfargotunnel.com"}]\n' >"$FAKE/cf-dns"
-  printf '[{"id":"other-app","name":"vpn","domain":"vpn.zone.example"},{"id":"access-app","name":"talos-lab-access","domain":"ssh.zone.example"}]\n' >"$FAKE/cf-apps"
+  printf '[{"id":"other-app","name":"vpn","domain":"vpn.zone.example"},{"id":"access-app","name":"talos-lab-access-0","domain":"ssh0.zone.example"}]\n' >"$FAKE/cf-apps"
   printf '[{"id":"other-token","name":"ci"},{"id":"access-token","name":"talos-lab-access"}]\n' >"$FAKE/cf-service-tokens"
   : >"$FAKE/cf-calls"
   printf '{"data":[{"vmid":100,"name":"unrelated","status":"running"},{"vmid":9011,"name":"seat01-cp","status":"stopped"},{"vmid":9012,"name":"intruder","status":"running"}]}\n' >"$FAKE/pve-qemu"
@@ -74,6 +74,7 @@ load_libs() {
   source "$LAB_ROOT/lib/common.sh"
   source "$LAB_ROOT/lib/pve-api.sh"
   source "$LAB_ROOT/lib/cloudflare.sh"
+  source "$LAB_ROOT/lib/hosts-layer.sh"
   source "$LAB_ROOT/lib/host-layer.sh"
   source "$LAB_ROOT/lib/seats-layer.sh"
   source "$LAB_ROOT/lib/rehearsal-layer.sh"
@@ -83,10 +84,15 @@ load_libs() {
   source "$LAB_ROOT/lib/access-layer.sh"
   source "$LAB_ROOT/lib/campus-layer.sh"
   LAB_STATE="$WORK/state"
-  HOST_STATE="$LAB_STATE/host"
+  SHARED_STATE="$LAB_STATE/shared"
+  LAB_HOSTS_STATE="$LAB_STATE/hosts"
   ACCESS_STATE="$LAB_STATE/access"
   LAB_SEATS_STATE="$LAB_STATE/seats"
-  mkdir -p "$HOST_STATE" "$LAB_SEATS_STATE"
+  mkdir -p "$SHARED_STATE" "$LAB_SEATS_STATE" "$LAB_HOSTS_STATE/campus"
+  printf 'HOST_INDEX=0\nHOST_SEATS=4\n' >"$LAB_HOSTS_STATE/campus/host.env"
+  host_select campus
+  mkdir -p "$HOST_STATE"
+  CF_ACCESS_INDEX=0
   LAB_CF_ACCOUNT_ID=acct
   LAB_TUNNEL_ZONE=zone.example
   LAB_TUNNEL_DELETE_ATTEMPTS=2
@@ -107,13 +113,13 @@ cf_allowed() { cf_assert_allowed "$@" 2>/dev/null; }
 cf_refused() { ! cf_assert_allowed "$@" 2>/dev/null; }
 
 test_cf_allowlist_permits_lab_tunnels_when_current() {
-  LAB_TUNNEL_NAME=talos-lab-host
-  cf_allowed tunnels create --name talos-lab-host --config-source cloudflare || return 1
+  LAB_TUNNEL_NAME=talos-lab-host-0
+  cf_allowed tunnels create --name talos-lab-host-0 --config-source cloudflare || return 1
   LAB_TUNNEL_NAME=talos-student-07
   cf_allowed tunnels create --name talos-student-07 --config-source cloudflare
 }
 test_cf_allowlist_refuses_a_tunnel_that_is_not_current() {
-  LAB_TUNNEL_NAME=talos-lab-host
+  LAB_TUNNEL_NAME=talos-lab-host-0
   cf_refused tunnels create --name talos-student-07 --config-source cloudflare
 }
 test_cf_allowlist_refuses_other_tunnel_names_even_when_current() {
@@ -125,7 +131,7 @@ test_cf_allowlist_refuses_other_tunnel_names_even_when_current() {
 }
 test_cf_allowlist_permits_every_lab_hostname() {
   local host
-  for host in team07 omni07 kube07 shell07 auth pve; do
+  for host in team07 omni07 kube07 shell07 auth pve0 pve9; do
     LAB_TUNNEL_HOSTNAME="$host.zone.example"
     cf_allowed dns records create -z zone.example --body "{\"name\":\"$host.zone.example\",\"type\":\"CNAME\"}" || return 1
   done
@@ -173,7 +179,7 @@ test_cf_refused_call_never_reaches_cf() {
 
 test_snapshot_lists_only_resources_the_lab_does_not_own() {
   local snapshot
-  printf '[{"id":"home-tunnel-id","name":"home-tunnel"},{"id":"t1","name":"talos-lab-host"},{"id":"t2","name":"talos-student-03"}]\n' >"$FAKE/cf-tunnels"
+  printf '[{"id":"home-tunnel-id","name":"home-tunnel"},{"id":"t1","name":"talos-lab-host-0"},{"id":"t2","name":"talos-student-03"}]\n' >"$FAKE/cf-tunnels"
   printf '[{"id":"a","name":"www.zone.example","type":"CNAME","content":"x"},{"id":"b","name":"omni03.zone.example","type":"CNAME","content":"y"},{"id":"c","name":"auth.zone.example","type":"CNAME","content":"y"},{"id":"d","name":"omni.zone.example","type":"CNAME","content":"y"}]\n' >"$FAKE/cf-dns"
   snapshot="$(cf_snapshot_others)" || return 1
   [[ "$snapshot" == $'dns a www.zone.example CNAME x\ndns d omni.zone.example CNAME y\ntunnel home-tunnel-id home-tunnel' ]]
@@ -270,41 +276,46 @@ test_container_guard_handles_string_ids() {
 
 test_host_ingress_routes_each_seat_and_ends_with_a_catch_all() {
   local ingress
-  mkdir -p "$LAB_SEATS_STATE/seat01" "$LAB_SEATS_STATE/seat03"
+  mkdir -p "$LAB_SEATS_STATE/seat01" "$LAB_SEATS_STATE/seat03" "$LAB_SEATS_STATE/seat05"
+  printf 'campus\n' >"$LAB_SEATS_STATE/seat01/host"
+  printf 'campus\n' >"$LAB_SEATS_STATE/seat03/host"
+  printf 'home\n' >"$LAB_SEATS_STATE/seat05/host"
   ingress="$(host_render_ingress)" || return 1
   [[ "$(jq -r '.[-1].service' <<<"$ingress")" == http_status:404 ]] || return 1
   [[ "$(jq -r '.[] | select(.hostname == "omni03.zone.example") | .service' <<<"$ingress")" == http://10.88.3.2:8080 ]] || return 1
   [[ "$(jq -r '.[] | select(.hostname == "kube01.zone.example") | .service' <<<"$ingress")" == http://10.88.1.2:8095 ]] || return 1
-  [[ "$(jq -r '.[] | select(.hostname == "pve.zone.example") | .originRequest.noTLSVerify' <<<"$ingress")" == true ]] || return 1
+  [[ "$(jq -r '.[] | select(.hostname == "pve0.zone.example") | .originRequest.noTLSVerify' <<<"$ingress")" == true ]] || return 1
   [[ "$(jq -r '.[] | select(.hostname == "shell03.zone.example") | .service' <<<"$ingress")" == http://10.88.3.3:8443 ]] || return 1
   [[ "$(jq 'length' <<<"$ingress")" == 9 ]]
 }
 test_dex_config_carries_hashes_not_passwords() {
   local config
   mkdir -p "$LAB_SEATS_STATE/seat02"
-  printf 'secret\n' >"$HOST_STATE/dex-client-secret"
-  printf 'pve-secret\n' >"$HOST_STATE/proxmox-client-secret"
-  printf 'student02\tstudent02@zone.example\t%s\t$2b$10$hash\tuuid-2\n' "$SECRET_PASSWORD" >"$HOST_STATE/users.tsv"
+  printf 'secret\n' >"$SHARED_STATE/dex-client-secret"
+  printf 'pve-secret\n' >"$SHARED_STATE/proxmox-client-secret"
+  printf 'student02\tstudent02@zone.example\t%s\t$2b$10$hash\tuuid-2\n' "$SECRET_PASSWORD" >"$SHARED_STATE/users.tsv"
+  mkdir -p "$LAB_HOSTS_STATE/home"
+  printf 'HOST_INDEX=1\nHOST_SEATS=2\n' >"$LAB_HOSTS_STATE/home/host.env"
   config="$(host_render_dex)" || return 1
   ! grep -qF "$SECRET_PASSWORD" <<<"$config" || return 1
   [[ "$(jq -r '.staticPasswords[0].hash' <<<"$config")" == '$2b$10$hash' ]] || return 1
   [[ "$(jq -r '.staticClients[0].redirectURIs[0]' <<<"$config")" == https://omni02.zone.example/oidc/consume ]] || return 1
-  [[ "$(jq -r '.staticClients[] | select(.id == "proxmox") | .redirectURIs[0]' <<<"$config")" == https://pve.zone.example ]]
+  [[ "$(jq -r '.staticClients[] | select(.id == "proxmox") | .redirectURIs | join(" ")' <<<"$config")" == "https://pve0.zone.example https://pve1.zone.example" ]]
 }
 test_seat_numbers_succeed_with_no_seats() {
   set -o pipefail
-  [[ "$(host_seat_numbers | sort -u)" == "" ]]
+  [[ "$(lab_seat_numbers | sort -u)" == "" && "$(host_seats_on campus)" == "" ]]
 }
 test_seat_numbers_list_existing_seats() {
   mkdir -p "$LAB_SEATS_STATE/seat03" "$LAB_SEATS_STATE/seat11"
-  [[ "$(host_seat_numbers | paste -sd' ')" == "03 11" ]]
+  [[ "$(lab_seat_numbers | paste -sd' ')" == "03 11" ]]
 }
 test_host_users_are_added_once_and_removed() {
-  printf 'student01\tstudent01@zone.example\tpw\thash\tid\n' >"$HOST_STATE/users.tsv"
+  printf 'student01\tstudent01@zone.example\tpw\thash\tid\n' >"$SHARED_STATE/users.tsv"
   host_ensure_user student01 || return 1
-  [[ "$(grep -c . "$HOST_STATE/users.tsv")" == 1 ]] || return 1
+  [[ "$(grep -c . "$SHARED_STATE/users.tsv")" == 1 ]] || return 1
   host_remove_user student01
-  [[ ! -s "$HOST_STATE/users.tsv" ]]
+  [[ ! -s "$SHARED_STATE/users.tsv" ]]
 }
 test_host_passwords_avoid_look_alike_characters() {
   local password count
@@ -420,9 +431,9 @@ test_guide_extension_packs_reproducibly() {
 test_guide_seat_info_carries_the_seat_links() {
   local info
   seat_use 3
-  printf 'student03\tstudent03@zone.example\t%s\thash\tid\n' "$SECRET_PASSWORD" >"$HOST_STATE/users.tsv"
+  printf 'student03\tstudent03@zone.example\t%s\thash\tid\n' "$SECRET_PASSWORD" >"$SHARED_STATE/users.tsv"
   info="$(seat_render_seat_info)"
-  jq -e '.seat == "03" and .email == "student03@zone.example" and .links.omni == "https://omni03.zone.example" and .links.proxmox == "https://pve.zone.example" and .links.site == "https://team03.zone.example" and .upgrade.talos == "1.14.6" and .upgrade.kubernetes == "1.37.2"' <<<"$info" >/dev/null || return 1
+  jq -e '.seat == "03" and .email == "student03@zone.example" and .links.omni == "https://omni03.zone.example" and .links.proxmox == "https://pve0.zone.example" and .links.site == "https://team03.zone.example" and .upgrade.talos == "1.14.6" and .upgrade.kubernetes == "1.37.2"' <<<"$info" >/dev/null || return 1
   [[ "$(jq -r .password <<<"$info" | wc -c)" -gt 1 ]]
 }
 
@@ -511,22 +522,25 @@ EOF
 }
 
 test_cf_allowlist_permits_the_access_tunnel_and_hostname() {
-  LAB_TUNNEL_NAME=talos-lab-access
-  cf_allowed tunnels create --name talos-lab-access --config-source cloudflare || return 1
-  LAB_TUNNEL_HOSTNAME=ssh.zone.example
-  cf_allowed dns records create -z zone.example --body '{"type":"CNAME","name":"ssh.zone.example","content":"x.cfargotunnel.com"}' || return 1
+  LAB_TUNNEL_NAME=talos-lab-access-0
+  cf_allowed tunnels create --name talos-lab-access-0 --config-source cloudflare || return 1
+  cf_refused tunnels create --name talos-lab-access-1 --config-source cloudflare || return 1
+  LAB_TUNNEL_HOSTNAME=ssh0.zone.example
+  cf_allowed dns records create -z zone.example --body '{"type":"CNAME","name":"ssh0.zone.example","content":"x.cfargotunnel.com"}' || return 1
+  LAB_TUNNEL_HOSTNAME=ssh1.zone.example
+  cf_refused dns records create -z zone.example --body '{"type":"CNAME","name":"ssh1.zone.example","content":"x.cfargotunnel.com"}' || return 1
   LAB_TUNNEL_HOSTNAME=ssh2.zone.example
   cf_refused dns records create -z zone.example --body '{"type":"CNAME","name":"ssh2.zone.example","content":"x.cfargotunnel.com"}'
 }
 test_host_layer_does_not_claim_the_access_tunnel() {
-  ! cf_tunnel_name_owned talos-lab-access && ! cf_hostname_owned ssh.zone.example
+  ! cf_tunnel_name_owned talos-lab-access-0 && ! cf_hostname_owned ssh0.zone.example
 }
 test_cf_allowlist_limits_access_applications_to_the_lab_one() {
   local body
   CF_ACCESS_TOKEN_ID=token_uuid
   body="$(access_render_app)"
   cf_allowed zero-trust access applications create --body "$body" || return 1
-  jq -e '.policies == [{name: "talos-lab-access", decision: "non_identity", include: [{service_token: {token_id: "token_uuid"}}]}] and .type == "self_hosted"' <<<"$body" >/dev/null || return 1
+  jq -e '.domain == "ssh0.zone.example" and .policies == [{name: "talos-lab-access-0", decision: "non_identity", include: [{service_token: {token_id: "token_uuid"}}]}] and .type == "self_hosted"' <<<"$body" >/dev/null || return 1
   cf_refused zero-trust access applications create --body "$(jq -c '.domain = "vpn.zone.example"' <<<"$body")" || return 1
   cf_refused zero-trust access applications create --body "$(jq -c '.name = "vpn"' <<<"$body")" || return 1
   cf_refused zero-trust access applications create --body "$(jq -c '.type = "ssh"' <<<"$body")" || return 1
@@ -547,11 +561,11 @@ test_cf_allowlist_limits_service_tokens_to_the_lab_one() {
 }
 test_access_snapshot_covers_everything_but_access_resources() {
   local snapshot
-  printf '[{"id":"home-tunnel-id","name":"home-tunnel","deleted_at":null},{"id":"host-id","name":"talos-lab-host","deleted_at":null},{"id":"access-id","name":"talos-lab-access","deleted_at":null}]\n' >"$FAKE/cf-tunnels"
-  printf '[{"id":"ssh-rec","name":"ssh.zone.example","type":"CNAME","content":"access-id.cfargotunnel.com"},{"id":"pve-rec","name":"pve.zone.example","type":"CNAME","content":"host-id.cfargotunnel.com"}]\n' >"$FAKE/cf-dns"
+  printf '[{"id":"home-tunnel-id","name":"home-tunnel","deleted_at":null},{"id":"host-id","name":"talos-lab-host-0","deleted_at":null},{"id":"access-id","name":"talos-lab-access-0","deleted_at":null}]\n' >"$FAKE/cf-tunnels"
+  printf '[{"id":"ssh-rec","name":"ssh0.zone.example","type":"CNAME","content":"access-id.cfargotunnel.com"},{"id":"pve-rec","name":"pve0.zone.example","type":"CNAME","content":"host-id.cfargotunnel.com"}]\n' >"$FAKE/cf-dns"
   snapshot="$(cf_snapshot_access_others)" || return 1
-  [[ "$snapshot" == "$(printf '%s\n' 'access-app other-app vpn vpn.zone.example' 'dns pve-rec pve.zone.example CNAME host-id.cfargotunnel.com' 'service-token other-token ci' 'tunnel home-tunnel-id home-tunnel' 'tunnel host-id talos-lab-host' | sort)" ]] || return 1
-  [[ "$(cf_snapshot_others)" == "$(printf '%s\n' 'dns ssh-rec ssh.zone.example CNAME access-id.cfargotunnel.com' 'tunnel access-id talos-lab-access' 'tunnel home-tunnel-id home-tunnel' | sort)" ]] || return 1
+  [[ "$snapshot" == "$(printf '%s\n' 'access-app other-app vpn vpn.zone.example' 'dns pve-rec pve0.zone.example CNAME host-id.cfargotunnel.com' 'service-token other-token ci' 'tunnel home-tunnel-id home-tunnel' 'tunnel host-id talos-lab-host-0' | sort)" ]] || return 1
+  [[ "$(cf_snapshot_others)" == "$(printf '%s\n' 'dns ssh-rec ssh0.zone.example CNAME access-id.cfargotunnel.com' 'tunnel access-id talos-lab-access-0' 'tunnel home-tunnel-id home-tunnel' | sort)" ]] || return 1
   cf_lookup_access || return 1
   [[ "$CF_ACCESS_APP_ID" == access-app && "$CF_ACCESS_TOKEN_ID" == access-token ]]
 }
@@ -567,7 +581,8 @@ test_access_bootstrap_carries_the_key_and_token_it_validates() {
   local script key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPUBLICKEYFORTESTS talos-lab-site'
   mkdir -p "$ACCESS_STATE/ssh" "$WORK/notroot"
   printf '%s\n' "$key" >"$ACCESS_STATE/ssh/id_ed25519.pub"
-  printf '%s' "$LONG_CONNECTOR_TOKEN" >"$ACCESS_STATE/connector-token"
+  mkdir -p "$(access_host_state)"
+  printf '%s' "$LONG_CONNECTOR_TOKEN" >"$(access_host_state)/connector-token"
   script="$(access_render_bootstrap)" || return 1
   bash -n <<<"$script" || return 1
   [[ "$(sed -n 2p <<<"$script")" == "set -- '$key' '$LONG_CONNECTOR_TOKEN'" ]] || return 1
@@ -585,15 +600,15 @@ test_pve_ssh_goes_through_access_only_when_set() {
   [[ " ${PVE_SSH_OPTIONS[*]} " == *" ConnectTimeout=10 "* && " ${PVE_SSH_OPTIONS[*]} " != *ProxyCommand* ]] || return 1
   PVE_SSH_ACCESS="$WORK/token.env"
   pve_ssh_options
-  [[ " ${PVE_SSH_OPTIONS[*]} " == *" ProxyCommand=$LAB_STATE/host/bin/cloudflared access ssh --hostname %h "* ]] || return 1
+  [[ " ${PVE_SSH_OPTIONS[*]} " == *" ProxyCommand=$LAB_STATE/shared/bin/cloudflared access ssh --hostname %h "* ]] || return 1
   [[ " ${PVE_SSH_OPTIONS[*]} " == *" ControlPath=none "* && " ${PVE_SSH_OPTIONS[*]} " != *ConnectTimeout=10* ]]
 }
 test_pve_access_needs_the_api_forwarded_to_localhost() {
-  mkdir -p "$LAB_STATE/host/bin"
-  printf '#!/bin/sh\n' >"$LAB_STATE/host/bin/cloudflared"
-  chmod 755 "$LAB_STATE/host/bin/cloudflared"
+  mkdir -p "$LAB_STATE/shared/bin"
+  printf '#!/bin/sh\n' >"$LAB_STATE/shared/bin/cloudflared"
+  chmod 755 "$LAB_STATE/shared/bin/cloudflared"
   printf 'TUNNEL_SERVICE_TOKEN_ID=id.access\nTUNNEL_SERVICE_TOKEN_SECRET=%s\n' "$SECRET_PASSWORD" >"$WORK/token.env"
-  PVE_SSH_ACCESS="$WORK/token.env" PVE_SSH=root@ssh.zone.example PVE_URL=https://pve.example:8006
+  PVE_SSH_ACCESS="$WORK/token.env" PVE_SSH=root@ssh0.zone.example PVE_URL=https://pve.example:8006
   ! pve_access_open 2>"$WORK/err" || return 1
   grep -qF 'must be https://127.0.0.1:<port>' "$WORK/err" || return 1
   [[ "$TUNNEL_SERVICE_TOKEN_ID" == id.access ]]
@@ -622,8 +637,9 @@ test_access_target_sends_every_call_through_access() {
     for var in PVE_URL PVE_NODE PVE_TOKEN_ID PVE_TOKEN_SECRET PVE_TLS_PIN PVE_DISK_STORAGE PVE_SSH PVE_SSH_KEY PVE_SSH_KNOWN_HOSTS PVE_SSH_ACCESS; do
       [[ -n "${!var:-}" ]] || exit 1
     done
-    [[ "$PVE_URL" == https://127.0.0.1:18006 && "$PVE_SSH" == root@ssh.zone.example && "$PVE_TOKEN_ID" == 'talos-lab@pve!kit' ]] || exit 1
-    [[ "$PVE_SSH_ACCESS" == "$ACCESS_STATE/service-token.env" && "$PVE_SSH_KEY" == "$ACCESS_STATE/ssh/id_ed25519" && "$PVE_DISK_STORAGE" == lab-disks ]]
+    [[ "$PVE_URL" == https://127.0.0.1:18006 && "$PVE_SSH" == root@ssh0.zone.example && "$PVE_TOKEN_ID" == 'talos-lab@pve!kit' ]] || exit 1
+    [[ "$PVE_SSH_ACCESS" == "$ACCESS_STATE/service-token.env" && "$PVE_SSH_KEY" == "$ACCESS_STATE/ssh/id_ed25519" && "$PVE_DISK_STORAGE" == lab-disks ]] || exit 1
+    [[ "$PVE_SSH_KNOWN_HOSTS" == "$HOST_STATE/access/known_hosts" ]]
   )
 }
 
@@ -667,9 +683,9 @@ test_campus_starts_from_everything_open_without_rules() {
   [[ -z "$(campus_open_services $'rules\nuplink ens18')" ]]
 }
 test_campus_refuses_a_host_reached_without_access() {
-  printf 'PVE_URL=https://10.0.0.5:8006\nPVE_NODE=pve\nPVE_TOKEN_ID=t\nPVE_TOKEN_SECRET=s\nPVE_TLS_PIN=p\nPVE_DISK_STORAGE=local\nPVE_SSH=root@10.0.0.5\nPVE_SSH_KEY=k\nPVE_SSH_KNOWN_HOSTS=h\n' >"$WORK/direct.env"
+  printf 'PVE_URL=https://10.0.0.5:8006\nPVE_NODE=pve\nPVE_TOKEN_ID=t\nPVE_TOKEN_SECRET=s\nPVE_TLS_PIN=p\nPVE_DISK_STORAGE=local\nPVE_SSH=root@10.0.0.5\nPVE_SSH_KEY=k\nPVE_SSH_KNOWN_HOSTS=h\n' >"$HOST_STATE/target.env"
   printf 'LAB_CF_ACCOUNT_ID=acct\nLAB_TUNNEL_ZONE=zone.example\nLAB_OMNI_EULA_NAME=n\nLAB_OMNI_EULA_EMAIL=e\n' >"$WORK/lab.env"
-  ! (LAB_CONFIG="$WORK/lab.env" LAB_PVE_TARGET="$WORK/direct.env" campus_load) 2>"$WORK/err" || return 1
+  ! (LAB_CONFIG="$WORK/lab.env" campus_load campus) 2>"$WORK/err" || return 1
   grep -qF 'need a target reached through Cloudflare Access' "$WORK/err"
 }
 
@@ -717,6 +733,77 @@ test_pve_ssh_does_not_retry_once_the_command_started() {
   ! PATH="$WORK/flaky-bin:$PATH" pve_ssh 'pct create 9010' </dev/null >/dev/null 2>"$WORK/err" || return 1
   [[ "$(grep -c . "$FAKE/ssh-calls")" == 1 ]] && grep -qF 'client_loop: send disconnect' "$WORK/err" || return 1
   grep -qF 'error: ssh to root@host ended with exit 255 while running: pct create 9010' "$WORK/err"
+}
+
+add_test_host() {
+  mkdir -p "$LAB_HOSTS_STATE/$1"
+  printf 'HOST_INDEX=%s\nHOST_SEATS=%s\n' "$2" "$3" >"$LAB_HOSTS_STATE/$1/host.env"
+}
+test_hosts_are_ordered_by_index_not_name() {
+  add_test_host azure 2 10
+  add_test_host home 1 2
+  [[ "$(hosts_names | paste -sd' ')" == "campus home azure" && "$(hosts_primary)" == campus ]]
+}
+test_seats_fill_hosts_in_index_order_up_to_each_count() {
+  add_test_host home 1 1
+  printf 'HOST_INDEX=0\nHOST_SEATS=2\n' >"$LAB_HOSTS_STATE/campus/host.env"
+  seat_place 1 && seat_place 2 && seat_place 3 || return 1
+  [[ "$(seat_host_of 1) $(seat_host_of 2) $(seat_host_of 03)" == "campus campus home" ]] || return 1
+  [[ "$(host_seats_on campus | paste -sd' ') / $(host_seats_on home)" == "01 02 / 03" ]] || return 1
+  seat_place 2 || return 1
+  [[ "$(seat_host_of 2)" == campus ]] || return 1
+  ! (seat_place 4) 2>"$WORK/err" || return 1
+  grep -qF 'no host has room for seat 04: campus 2 of 2, home 1 of 1' "$WORK/err"
+}
+test_hosts_refuse_a_taken_index_and_a_bad_name() {
+  printf 'LAB_CF_ACCOUNT_ID=acct\nLAB_TUNNEL_ZONE=zone.example\nLAB_OMNI_EULA_NAME=n\nLAB_OMNI_EULA_EMAIL=e\n' >"$WORK/lab.env"
+  ! (LAB_CONFIG="$WORK/lab.env" hosts_add home 0 4) 2>"$WORK/err" || return 1
+  grep -qF 'host campus already has index 0' "$WORK/err" || return 1
+  ! (LAB_CONFIG="$WORK/lab.env" hosts_add Home 1 4) 2>/dev/null || return 1
+  (LAB_CONFIG="$WORK/lab.env" hosts_add home 1 4) 2>/dev/null || return 1
+  [[ "$(cat "$LAB_HOSTS_STATE/home/host.env")" == $'HOST_INDEX=1\nHOST_SEATS=4' ]]
+}
+test_a_second_host_routes_only_its_own_seats_and_proxmox() {
+  local ingress
+  add_test_host home 1 2
+  mkdir -p "$LAB_SEATS_STATE/seat01" "$LAB_SEATS_STATE/seat05"
+  printf 'campus\n' >"$LAB_SEATS_STATE/seat01/host"
+  printf 'home\n' >"$LAB_SEATS_STATE/seat05/host"
+  host_select home
+  ingress="$(host_render_ingress)" || return 1
+  [[ "$(jq -r '[.[].hostname // empty] | join(" ")' <<<"$ingress")" == "pve1.zone.example omni05.zone.example kube05.zone.example shell05.zone.example" ]] || return 1
+  [[ "$(host_tunnel_name) $(host_services | paste -sd' ')" == "talos-lab-host-1 talos-lab-cloudflared talos-lab-isolation" ]] || return 1
+  host_select campus
+  [[ "$(host_services | paste -sd' ')" == "talos-lab-dex talos-lab-cloudflared talos-lab-isolation" ]]
+}
+test_cf_allowlist_permits_each_hosts_tunnel_and_proxmox_name() {
+  LAB_TUNNEL_NAME=talos-lab-host-3
+  cf_allowed tunnels create --name talos-lab-host-3 --config-source cloudflare || return 1
+  LAB_TUNNEL_HOSTNAME=pve3.zone.example
+  cf_allowed dns records create -z zone.example --body '{"type":"CNAME","name":"pve3.zone.example","content":"x.cfargotunnel.com"}' || return 1
+  LAB_TUNNEL_HOSTNAME=pve.zone.example
+  cf_refused dns records create -z zone.example --body '{"type":"CNAME","name":"pve.zone.example","content":"x.cfargotunnel.com"}' || return 1
+  LAB_TUNNEL_NAME=talos-lab-host
+  cf_refused tunnels create --name talos-lab-host --config-source cloudflare
+}
+test_owned_records_carry_the_tunnel_they_point_at() {
+  printf '[{"id":"a","name":"omni05.zone.example","type":"CNAME","content":"t1.cfargotunnel.com"},{"id":"b","name":"www.zone.example","type":"CNAME","content":"x"},{"id":"c","name":"pve1.zone.example","type":"CNAME","content":"t2.cfargotunnel.com"}]\n' >"$FAKE/cf-dns"
+  [[ "$(cf_owned_records)" == $'omni05.zone.example t1.cfargotunnel.com\npve1.zone.example t2.cfargotunnel.com' ]]
+}
+test_access_names_follow_the_host_index() {
+  CF_ACCESS_INDEX=2
+  [[ "$(cf_access_name) $(cf_access_hostname)" == "talos-lab-access-2 ssh2.zone.example" ]] || return 1
+  CF_ACCESS_TOKEN_ID=token_uuid
+  cf_allowed zero-trust access applications create --body "$(access_render_app)" || return 1
+  cf_refused zero-trust access applications create --body "$(access_render_app | jq -c '.domain = "ssh1.zone.example"')"
+}
+test_guide_links_each_seat_to_its_hosts_proxmox() {
+  local readme
+  add_test_host home 1 2
+  host_select home
+  seat_use 5
+  readme="$(seat_render_readme)" || return 1
+  grep -qF 'https://pve1.zone.example' <<<"$readme" && ! grep -qF 'pve<host>' <<<"$readme"
 }
 
 passed=0

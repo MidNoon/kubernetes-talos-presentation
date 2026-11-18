@@ -16,31 +16,35 @@ readonly HOST_DOWNLOAD_ROLE=TalosLabDownload
 readonly HOST_DOWNLOAD_PRIVILEGES=Sys.AccessNetwork
 readonly HOST_ISO_ROOT=/var/lib/talos-lab/iso
 readonly HOST_DEX_PORT=5556
-readonly HOST_TUNNEL_NAME=talos-lab-host
 readonly HOST_REMOTE_BIN=/usr/local/lib/talos-lab
 readonly HOST_REMOTE_ETC=/etc/talos-lab
-readonly HOST_SERVICES=(talos-lab-dex talos-lab-cloudflared talos-lab-isolation)
 readonly HOST_SEAT_RANGE=10.88.0.0/16
 readonly HOST_BLOCKED_RANGES='10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16'
 readonly HOST_READY_TIMEOUT=300
 readonly HOST_ADDRESS_HOOK=/etc/dhcp/dhclient-exit-hooks.d/talos-lab
 readonly HOST_CT_TEMPLATE_PATTERN='^debian-13-standard_[0-9.-]+_amd64\.tar\.zst$'
 
-HOST_STATE="$LAB_STATE/host"
 LAB_SEATS_STATE="$LAB_STATE/seats"
 
 host_name() {
   printf '%s.%s' "$1" "$LAB_TUNNEL_ZONE"
 }
 
-host_load_config() {
-  lab_load_config
-  pve_load_target || exit 1
-  mkdir -p "$HOST_STATE" "$LAB_SEATS_STATE"
+host_tunnel_name() {
+  printf 'talos-lab-host-%s' "$HOST_INDEX"
+}
+
+host_is_primary() {
+  [[ "$HOST_INDEX" == 0 ]]
+}
+
+host_services() {
+  host_is_primary && printf 'talos-lab-dex\n'
+  printf 'talos-lab-cloudflared\ntalos-lab-isolation\n'
 }
 
 host_omni_release_file() {
-  local name="$1" target="$2" sums="$HOST_STATE/bin/omni.sha256sum.txt"
+  local name="$1" target="$2" sums="$SHARED_STATE/bin/omni.sha256sum.txt"
   if [[ ! -s "$sums" ]]; then
     curl --fail --silent --show-error --location --output "$sums" \
       "https://github.com/siderolabs/omni/releases/download/$HOST_OMNI_VERSION/sha256sum.txt"
@@ -56,7 +60,7 @@ host_omni_release_file() {
 }
 
 host_fetch_binaries() {
-  local dir="$HOST_STATE/bin" cid platform
+  local dir="$SHARED_STATE/bin" cid platform
   mkdir -p "$dir/omnictl"
   host_omni_release_file omni-linux-amd64 "$dir/omni"
   for platform in "${HOST_OMNICTL_PLATFORMS[@]}"; do
@@ -94,7 +98,7 @@ host_fetch_verified() {
 }
 
 host_omnictl_local() {
-  printf '%s/bin/omnictl/omnictl-linux-amd64' "$HOST_STATE"
+  printf '%s/bin/omnictl/omnictl-linux-amd64' "$SHARED_STATE"
 }
 
 host_random_password() {
@@ -106,7 +110,7 @@ host_random_password() {
 }
 
 host_ensure_user() {
-  local username="$1" users="$HOST_STATE/users.tsv" password hash
+  local username="$1" users="$SHARED_STATE/users.tsv" password hash
   touch "$users"
   if awk -F'\t' -v u="$username" '$1 == u {found = 1} END {exit !found}' "$users"; then
     return 0
@@ -118,42 +122,34 @@ host_ensure_user() {
 }
 
 host_remove_user() {
-  local users="$HOST_STATE/users.tsv"
+  local users="$SHARED_STATE/users.tsv"
   [[ -f "$users" ]] || return 0
   awk -F'\t' -v u="$1" '$1 != u' "$users" >"$users.new"
   mv "$users.new" "$users"
 }
 
 host_user_password() {
-  awk -F'\t' -v u="$1" '$1 == u {print $3}' "$HOST_STATE/users.tsv"
-}
-
-host_seat_numbers() {
-  local dir
-  for dir in "$LAB_SEATS_STATE"/seat[0-9][0-9]; do
-    if [[ -d "$dir" ]]; then
-      printf '%s\n' "${dir##*/seat}"
-    fi
-  done
+  awk -F'\t' -v u="$1" '$1 == u {print $3}' "$SHARED_STATE/users.tsv"
 }
 
 host_ensure_secrets() {
-  [[ -s "$HOST_STATE/dex-client-secret" ]] || openssl rand -hex 32 >"$HOST_STATE/dex-client-secret"
-  [[ -s "$HOST_STATE/proxmox-client-secret" ]] || openssl rand -hex 32 >"$HOST_STATE/proxmox-client-secret"
+  [[ -s "$SHARED_STATE/dex-client-secret" ]] || openssl rand -hex 32 >"$SHARED_STATE/dex-client-secret"
+  [[ -s "$SHARED_STATE/proxmox-client-secret" ]] || openssl rand -hex 32 >"$SHARED_STATE/proxmox-client-secret"
   host_ensure_user instructor
 }
 
 host_render_dex() {
-  local redirects number
-  redirects="$(for number in $(host_seat_numbers); do printf 'https://%s/oidc/consume\n' "$(host_name "omni$number")"; done | jq -R . | jq -s -c .)"
+  local redirects proxmox number name
+  redirects="$(for number in $(lab_seat_numbers); do printf 'https://%s/oidc/consume\n' "$(host_name "omni$number")"; done | jq -R . | jq -s -c .)"
+  proxmox="$(for name in $(hosts_names); do printf 'https://%s\n' "$(host_name "pve$(sed -n 's/^HOST_INDEX=//p' "$LAB_HOSTS_STATE/$name/host.env")")"; done | jq -R . | jq -s -c .)"
   jq -n \
     --arg issuer "https://$(host_name auth)" \
     --arg listen "127.0.0.1:$HOST_DEX_PORT" \
-    --arg secret "$(<"$HOST_STATE/dex-client-secret")" \
-    --arg proxmox_secret "$(<"$HOST_STATE/proxmox-client-secret")" \
-    --arg proxmox "https://$(host_name pve)" \
+    --arg secret "$(<"$SHARED_STATE/dex-client-secret")" \
+    --arg proxmox_secret "$(<"$SHARED_STATE/proxmox-client-secret")" \
+    --argjson proxmox "$proxmox" \
     --argjson redirects "$redirects" \
-    --rawfile users "$HOST_STATE/users.tsv" \
+    --rawfile users "$SHARED_STATE/users.tsv" \
     '{
       issuer: $issuer,
       storage: {type: "memory"},
@@ -161,7 +157,7 @@ host_render_dex() {
       oauth2: {skipApprovalScreen: true, passwordConnector: "local"},
       staticClients: [
         {id: "omni", name: "Omni", secret: $secret, redirectURIs: $redirects},
-        {id: "proxmox", name: "Proxmox", secret: $proxmox_secret, redirectURIs: [$proxmox]}
+        {id: "proxmox", name: "Proxmox", secret: $proxmox_secret, redirectURIs: $proxmox}
       ],
       enablePasswordDB: true,
       staticPasswords: [
@@ -246,7 +242,7 @@ EOF
   [[ -n "$dns" ]] || die "the Proxmox host has no IPv4 nameserver in /etc/resolv.conf: $(pve_ssh "grep nameserver /etc/resolv.conf" | paste -sd' ')"
   [[ "$dns" != 127.* ]] || die "the Proxmox host resolves through $dns, which seats cannot reach. Put an upstream IPv4 nameserver first in /etc/resolv.conf"
   printf '%s\n' "$dns" >"$HOST_STATE/host-dns"
-  log "host prepared: dnsmasq, wireguard module, IPv4 forwarding, SDN zone $HOST_SDN_ZONE, Debian container template"
+  log "$HOST_NAME prepared: dnsmasq, wireguard module, IPv4 forwarding, SDN zone $HOST_SDN_ZONE, Debian container template"
 }
 
 host_ct_template() {
@@ -260,10 +256,10 @@ host_upload_binaries() {
   done
   pve_ssh "mkdir -p $HOST_REMOTE_BIN/omnictl $HOST_REMOTE_ETC && chmod 755 $HOST_REMOTE_BIN $HOST_REMOTE_BIN/omnictl && chmod 700 $HOST_REMOTE_ETC"
   for name in "${names[@]}"; do
-    local_sum="$(sha256sum "$HOST_STATE/bin/$name" | cut -d' ' -f1)"
+    local_sum="$(sha256sum "$SHARED_STATE/bin/$name" | cut -d' ' -f1)"
     remote_sum="$(pve_ssh "sha256sum $HOST_REMOTE_BIN/$name 2>/dev/null | cut -d' ' -f1" || true)"
     if [[ "$local_sum" != "$remote_sum" ]]; then
-      pve_scp "$HOST_STATE/bin/$name" "$PVE_SSH:$HOST_REMOTE_BIN/$name.part"
+      pve_scp "$SHARED_STATE/bin/$name" "$PVE_SSH:$HOST_REMOTE_BIN/$name.part"
       pve_ssh "chmod 755 $HOST_REMOTE_BIN/$name.part && mv $HOST_REMOTE_BIN/$name.part $HOST_REMOTE_BIN/$name"
       log "uploaded $name"
     fi
@@ -282,7 +278,7 @@ EOF
 }
 
 host_ensure_realm() {
-  pve_remote REALM="$HOST_PVE_REALM" ISSUER="https://$(host_name auth)" SECRET="$(<"$HOST_STATE/proxmox-client-secret")" \
+  pve_remote REALM="$HOST_PVE_REALM" ISSUER="https://$(host_name auth)" SECRET="$(<"$SHARED_STATE/proxmox-client-secret")" \
     INSTRUCTOR="instructor@$HOST_PVE_REALM" <<'EOF'
 set -euo pipefail
 options=(--issuer-url "$ISSUER" --client-id proxmox --client-key "$SECRET" --scopes "openid email profile" --autocreate 0 --default 1 --comment "Lab login")
@@ -366,7 +362,7 @@ host_omni_login() {
 
 host_pve_login() {
   local username="$1" pve response start="" result code="" state="" session
-  pve="https://$(host_name pve)"
+  pve="https://$(host_name "$(host_pve_label)")"
   if response="$(lab_public_curl --silent --show-error --max-time 30 --data-urlencode "realm=$HOST_PVE_REALM" \
     --data-urlencode "redirect-url=$pve" "$pve/api2/json/access/openid/auth-url" 2>&1)"; then
     start="$(jq -r '.data // empty' <<<"$response" 2>/dev/null)"
@@ -402,7 +398,7 @@ host_pve_session_api() {
   shift 2
   body="$(lab_public_curl --silent --show-error --fail-with-body --max-time 120 \
     --config <(printf 'cookie = "PVEAuthCookie=%s"\nheader = "CSRFPreventionToken: %s"\n' "$HOST_PVE_TICKET" "$HOST_PVE_CSRF") \
-    -X "$method" "https://$(host_name pve)/api2/json$path" "$@" 2>&1)" || status=$?
+    -X "$method" "https://$(host_name "$(host_pve_label)")/api2/json$path" "$@" 2>&1)" || status=$?
   if ((status != 0)); then
     fail "Proxmox API $method $path as a lab login failed with curl exit $status: $body"
     return 1
@@ -456,9 +452,12 @@ host_verify_seat_logins() {
 }
 
 host_install_dex() {
+  local current="$HOST_NAME"
+  host_switch "$(hosts_primary)"
   host_render_dex | host_install_file 600 "$HOST_REMOTE_ETC/dex.json"
   pve_ssh "systemctl restart talos-lab-dex"
   host_wait_local dex "http://127.0.0.1:$HOST_DEX_PORT/.well-known/openid-configuration"
+  host_switch "$current"
 }
 
 host_render_isolation() {
@@ -559,19 +558,23 @@ EOF
 }
 
 host_install_services() {
+  local services
+  services="$(host_services | paste -sd' ')"
   printf 'TUNNEL_TOKEN=%s\n' "$(<"$HOST_STATE/connector-token")" | host_install_file 600 "$HOST_REMOTE_ETC/cloudflared.env"
-  host_render_dex | host_install_file 600 "$HOST_REMOTE_ETC/dex.json"
-  host_render_dex_unit | host_install_file 644 /etc/systemd/system/talos-lab-dex.service
+  if host_is_primary; then
+    host_render_dex | host_install_file 600 "$HOST_REMOTE_ETC/dex.json"
+    host_render_dex_unit | host_install_file 644 /etc/systemd/system/talos-lab-dex.service
+  fi
   host_render_cloudflared_unit | host_install_file 644 /etc/systemd/system/talos-lab-cloudflared.service
   host_render_isolation | host_install_file 600 "$HOST_REMOTE_ETC/isolation.nft"
   host_render_isolation_unit | host_install_file 644 /etc/systemd/system/talos-lab-isolation.service
   host_render_address_hook | host_install_file 644 "$HOST_ADDRESS_HOOK"
-  pve_ssh "systemctl daemon-reload && systemctl enable --quiet ${HOST_SERVICES[*]} && systemctl restart ${HOST_SERVICES[*]}"
+  pve_ssh "systemctl daemon-reload && systemctl enable --quiet $services && systemctl restart $services"
 }
 
 host_service_logs() {
   local service
-  for service in "${HOST_SERVICES[@]}"; do
+  for service in $(host_services); do
     printf '== %s\n' "$service"
     pve_ssh "systemctl status --no-pager --lines=0 $service; journalctl --no-pager --lines=60 --unit $service" 2>&1 || true
   done
@@ -579,12 +582,12 @@ host_service_logs() {
 
 host_capture_failure() {
   local reason="$1" dir label
-  dir="$LAB_STATE/failures/host-$(date +%Y%m%dT%H%M%S)"
+  dir="$LAB_STATE/failures/host-$HOST_NAME-$(date +%Y%m%dT%H%M%S)"
   mkdir -p "$dir"
   host_service_logs >"$dir/services.txt" 2>&1 || true
   pve_ssh "ip -4 addr; ip -4 route; ss -ltnup; pct list; qm list" >"$dir/host.txt" 2>&1 || true
   pve_ssh "cat /etc/pve/sdn/*.cfg" >"$dir/sdn.txt" 2>&1 || true
-  for label in auth pve; do
+  for label in auth "$(host_pve_label)"; do
     lab_public_curl --silent --show-error --max-time 15 --verbose --output /dev/null "https://$(host_name "$label")/" >"$dir/curl-$label.txt" 2>&1 || true
   done
   die "$reason. Context saved in $dir"
@@ -618,11 +621,13 @@ host_seat_subnet() {
 
 host_wanted_hostnames() {
   local number label
-  host_name auth
+  if host_is_primary; then
+    host_name auth
+    printf '\n'
+  fi
+  host_name "$(host_pve_label)"
   printf '\n'
-  host_name pve
-  printf '\n'
-  for number in $(host_seat_numbers); do
+  for number in $(host_seats_on "$HOST_NAME"); do
     for label in omni kube shell; do
       host_name "$label$number"
       printf '\n'
@@ -633,9 +638,11 @@ host_wanted_hostnames() {
 host_render_ingress() {
   local number rules
   rules="$(
-    jq -n --arg host "$(host_name auth)" --arg service "http://127.0.0.1:$HOST_DEX_PORT" '{hostname: $host, service: $service}'
-    jq -n --arg host "$(host_name pve)" '{hostname: $host, service: "https://127.0.0.1:8006", originRequest: {noTLSVerify: true}}'
-    for number in $(host_seat_numbers); do
+    if host_is_primary; then
+      jq -n --arg host "$(host_name auth)" --arg service "http://127.0.0.1:$HOST_DEX_PORT" '{hostname: $host, service: $service}'
+    fi
+    jq -n --arg host "$(host_name "$(host_pve_label)")" '{hostname: $host, service: "https://127.0.0.1:8006", originRequest: {noTLSVerify: true}}'
+    for number in $(host_seats_on "$HOST_NAME"); do
       jq -n --arg host "$(host_name "omni$number")" --arg service "http://$(host_seat_address "$number" 2):8080" '{hostname: $host, service: $service}'
       jq -n --arg host "$(host_name "kube$number")" --arg service "http://$(host_seat_address "$number" 2):8095" '{hostname: $host, service: $service}'
       jq -n --arg host "$(host_name "shell$number")" --arg service "http://$(host_seat_address "$number" 3):8443" '{hostname: $host, service: $service}'
@@ -646,9 +653,9 @@ host_render_ingress() {
 }
 
 host_sync_tunnel() {
-  local ingress="$HOST_STATE/tunnel-ingress.json" wanted host
+  local ingress="$HOST_STATE/tunnel-ingress.json" wanted host content
   (
-    LAB_TUNNEL_NAME="$HOST_TUNNEL_NAME"
+    LAB_TUNNEL_NAME="$(host_tunnel_name)"
     tunnel_ensure || exit 1
     host_render_ingress >"$ingress"
     tunnel_set_ingress "$ingress" || exit 1
@@ -658,21 +665,25 @@ host_sync_tunnel() {
       LAB_TUNNEL_HOSTNAME="$host"
       tunnel_ensure_dns || exit 1
     done <<<"$wanted"
-    while IFS= read -r host; do
-      [[ "$host" =~ ^(omni|kube|shell)[0-9]{2}\. ]] || continue
+    while read -r host content; do
+      [[ "$content" == "$CF_LAB_TUNNEL_ID.cfargotunnel.com" ]] || continue
       grep -qxF "$host" <<<"$wanted" && continue
       LAB_TUNNEL_HOSTNAME="$host"
       tunnel_remove_dns || exit 1
-    done < <(cf_owned_hostnames)
+    done < <(cf_owned_records)
     if [[ ! -s "$HOST_STATE/connector-token" ]]; then
       tunnel_store_connector_token "$HOST_STATE/connector-token" || exit 1
     fi
   ) || exit 1
 }
 
-host_up() {
+host_up_one() {
   local before after
-  host_load_config
+  host_load "$1"
+  hosts_require_primary
+  if ! host_is_primary; then
+    [[ -s "$LAB_HOSTS_STATE/$(hosts_primary)/connector-token" ]] || die "bring up $(hosts_primary) first, because it runs the lab sign-in"
+  fi
   before="$(cf_snapshot_others)" || exit 1
   host_fetch_binaries
   host_ensure_secrets
@@ -680,12 +691,26 @@ host_up() {
   host_upload_binaries
   host_sync_tunnel
   host_install_services
-  host_wait_local dex "http://127.0.0.1:$HOST_DEX_PORT/.well-known/openid-configuration"
+  if host_is_primary; then
+    host_wait_local dex "http://127.0.0.1:$HOST_DEX_PORT/.well-known/openid-configuration"
+  else
+    host_install_dex
+  fi
   host_ensure_realm
   host_ensure_roles
   host_verify
   after="$(cf_snapshot_others)" || exit 1
-  [[ "$before" == "$after" ]] || die "other Cloudflare resources changed during host up. Before: $before. After: $after"
+  [[ "$before" == "$after" ]] || die "other Cloudflare resources changed during host up on $HOST_NAME. Before: $before. After: $after"
+}
+
+host_up() {
+  local name names
+  lab_load_config
+  names="${1:-$(hosts_names)}"
+  [[ -n "$names" ]] || die "no hosts yet, add one with ./lab hosts add <name> <index> <seats>"
+  for name in $names; do
+    host_up_one "$name"
+  done
 }
 
 host_verify_address() {
@@ -699,33 +724,49 @@ host_verify_address() {
 
 host_verify() {
   local service number seats
-  for service in "${HOST_SERVICES[@]}"; do
-    pve_ssh "systemctl is-active --quiet $service" || host_capture_failure "$service is not active"
+  for service in $(host_services); do
+    pve_ssh "systemctl is-active --quiet $service" || host_capture_failure "$service is not active on $HOST_NAME"
   done
   host_wait_public dex "https://$(host_name auth)/.well-known/openid-configuration"
-  host_wait_public proxmox "https://$(host_name pve)/"
+  host_wait_public "$(host_pve_label)" "https://$(host_name "$(host_pve_label)")/"
   host_verify_address
-  host_pve_login instructor || host_capture_failure "instructor cannot sign in to Proxmox"
-  log "instructor signs in to Proxmox through Dex"
-  seats="$(host_seat_numbers)"
+  host_pve_login instructor || host_capture_failure "instructor cannot sign in to $(host_pve_label)"
+  log "instructor signs in to $(host_pve_label) through Dex"
+  seats="$(host_seats_on "$HOST_NAME")"
   for number in $seats; do
     host_wait_public "omni for seat $number" "https://$(host_name "omni$number")/"
     host_wait_public "workspace for seat $number" "https://$(host_name "shell$number")/healthz"
     host_verify_seat_logins "$number"
     host_verify_isolation "$number" "$seats"
   done
-  log "host verified: logins at https://$(host_name auth), Proxmox at https://$(host_name pve), $(host_seat_numbers | grep -c . || true) seats"
+  log "$HOST_NAME verified: Proxmox at https://$(host_name "$(host_pve_label)"), $(grep -c . <<<"$seats" || true) of $HOST_SEATS seats"
 }
 
-host_down() {
-  local before after leftovers=() vnets label
-  host_load_config
-  [[ -z "$(host_seat_numbers)" ]] || die "seats still exist: $(host_seat_numbers | paste -sd' '), run ./lab seats delete first"
+host_verify_hosts() {
+  local name names
+  lab_load_config
+  names="${1:-$(hosts_names)}"
+  for name in $names; do
+    host_load "$name"
+    host_verify
+  done
+}
+
+host_down_one() {
+  local before after leftovers=() vnets name labels=()
+  host_load "$1"
+  [[ -z "$(host_seats_on "$HOST_NAME")" ]] || die "$HOST_NAME still holds seats $(host_seats_on "$HOST_NAME" | paste -sd' '), delete them first"
+  if host_is_primary; then
+    for name in $(hosts_names); do
+      [[ "$name" == "$HOST_NAME" || ! -s "$LAB_HOSTS_STATE/$name/connector-token" ]] ||
+        die "$name still runs the lab and signs in through $HOST_NAME, run ./lab host down $name first"
+    done
+  fi
   vnets="$(pve_ssh "pvesh get /cluster/sdn/vnets --output-format json" | jq -r --arg zone "$HOST_SDN_ZONE" '.[] | select(.zone == $zone) | .vnet')" ||
-    die "could not list SDN vnets"
-  [[ -z "$vnets" ]] || die "zone $HOST_SDN_ZONE still has vnets: $(paste -sd' ' <<<"$vnets"), run ./lab seats delete first"
+    die "could not list SDN vnets on $HOST_NAME"
+  [[ -z "$vnets" ]] || die "zone $HOST_SDN_ZONE on $HOST_NAME still has vnets: $(paste -sd' ' <<<"$vnets"), delete its seats first"
   before="$(cf_snapshot_others)" || exit 1
-  pve_remote SERVICES="${HOST_SERVICES[*]}" BIN="$HOST_REMOTE_BIN" ETC="$HOST_REMOTE_ETC" ZONE="$HOST_SDN_ZONE" \
+  pve_remote SERVICES="$(host_services | paste -sd' ')" BIN="$HOST_REMOTE_BIN" ETC="$HOST_REMOTE_ETC" ZONE="$HOST_SDN_ZONE" \
     REALM="$HOST_PVE_REALM" ROLES="$HOST_MEDIA_ROLE $HOST_DOWNLOAD_ROLE" ISO_ROOT="$HOST_ISO_ROOT" ADDRESS_HOOK="$HOST_ADDRESS_HOOK" <<'EOF'
 set -euo pipefail
 if pveum user list --output-format json | grep -q "\"userid\":\"instructor@$REALM\""; then
@@ -740,36 +781,49 @@ for role in $ROLES; do
   fi
 done
 rmdir "$ISO_ROOT" 2>/dev/null || true
-for service in $SERVICES; do
+for service in $SERVICES talos-lab-dex; do
   systemctl disable --now "$service" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$service.service"
 done
 systemctl daemon-reload
-rm -rf "$BIN" "$ETC" /etc/modules-load.d/talos-lab.conf /etc/sysctl.d/talos-lab.conf "$ADDRESS_HOOK"
+rm -rf "${BIN:?}" "${ETC:?}" /etc/modules-load.d/talos-lab.conf /etc/sysctl.d/talos-lab.conf "${ADDRESS_HOOK:?}"
 if pvesh get "/cluster/sdn/zones/$ZONE" >/dev/null 2>&1; then
   pvesh delete "/cluster/sdn/zones/$ZONE" >/dev/null
   pvesh set /cluster/sdn >/dev/null
 fi
 EOF
+  labels=("$(host_pve_label)")
+  host_is_primary && labels+=(auth)
   (
-    LAB_TUNNEL_NAME="$HOST_TUNNEL_NAME"
-    for label in auth pve; do
-      LAB_TUNNEL_HOSTNAME="$(host_name "$label")"
+    LAB_TUNNEL_NAME="$(host_tunnel_name)"
+    for name in "${labels[@]}"; do
+      LAB_TUNNEL_HOSTNAME="$(host_name "$name")"
       tunnel_remove_dns || exit 1
     done
     tunnel_remove || exit 1
   ) || exit 1
-  rm -f "$HOST_STATE/connector-token" "$HOST_STATE/tunnel-ingress.json"
+  rm -f "$HOST_STATE/connector-token" "$HOST_STATE/tunnel-ingress.json" "$HOST_STATE/host-dns"
 
   pve_ssh "systemctl list-unit-files 'talos-lab-*' --no-legend | grep -q ." && leftovers+=("talos-lab systemd units")
   pve_ssh "pvesh get /cluster/sdn/zones/$HOST_SDN_ZONE" >/dev/null 2>&1 && leftovers+=("SDN zone $HOST_SDN_ZONE")
   pve_ssh "pveum realm list --output-format json" | grep -q "\"realm\":\"$HOST_PVE_REALM\"" && leftovers+=("Proxmox realm $HOST_PVE_REALM")
   pve_ssh "pveum role list --output-format json" | grep -qE "\"roleid\":\"($HOST_MEDIA_ROLE|$HOST_DOWNLOAD_ROLE)\"" && leftovers+=("Proxmox lab roles")
   pve_ssh "test -e $HOST_ISO_ROOT" && leftovers+=("$HOST_ISO_ROOT")
-  [[ -z "$(cf_owned_tunnels)" ]] || leftovers+=("tunnels $(cf_owned_tunnels | paste -sd' ')")
-  [[ -z "$(cf_owned_hostnames)" ]] || leftovers+=("DNS records $(cf_owned_hostnames | paste -sd' ')")
-  ((${#leftovers[@]} == 0)) || die "host teardown left resources behind: ${leftovers[*]}"
+  grep -qxF "$(host_tunnel_name)" <<<"$(cf_owned_tunnels)" && leftovers+=("tunnel $(host_tunnel_name)")
+  for name in "${labels[@]}"; do
+    grep -qxF "$(host_name "$name")" <<<"$(cf_owned_hostnames)" && leftovers+=("DNS record $(host_name "$name")")
+  done
+  ((${#leftovers[@]} == 0)) || die "teardown of $HOST_NAME left resources behind: ${leftovers[*]}"
   after="$(cf_snapshot_others)" || exit 1
-  [[ "$before" == "$after" ]] || die "other Cloudflare resources changed during host teardown. Before: $before. After: $after"
-  log "host layer removed, other tunnels and DNS records unchanged"
+  [[ "$before" == "$after" ]] || die "other Cloudflare resources changed during teardown of $HOST_NAME. Before: $before. After: $after"
+  log "$HOST_NAME lab services removed, other tunnels and DNS records unchanged"
+}
+
+host_down() {
+  local name names
+  lab_load_config
+  names="${1:-$(hosts_names | tac)}"
+  for name in $names; do
+    host_down_one "$name"
+  done
 }

@@ -49,7 +49,7 @@ EOF
 }
 
 campus_load() {
-  host_load_config
+  host_load "$1"
   [[ -n "${PVE_SSH_ACCESS:-}" ]] ||
     die "campus rules need a target reached through Cloudflare Access, because closing the campus side could cut off $PVE_SSH"
 }
@@ -103,10 +103,10 @@ systemctl restart $CAMPUS_UNIT" || die "could not load the campus rules on $PVE_
 }
 
 campus_set() {
-  local service="$1" wanted="$2" state current open=() name
+  local host="$1" service="$2" wanted="$3" state current open=() name
   campus_ports "$service" >/dev/null || die "unknown campus service $service, expected one of: ${CAMPUS_SERVICES[*]}"
   [[ "$wanted" == open || "$wanted" == close ]] || die "expected open or close, got $wanted"
-  campus_load
+  campus_load "$host"
   state="$(campus_state)" || die "could not read the campus rules on $PVE_SSH"
   current="$(campus_open_services "$state")"
   for name in "${CAMPUS_SERVICES[@]}"; do
@@ -120,12 +120,12 @@ campus_set() {
 }
 
 campus_close() {
-  campus_load
+  campus_load "$1"
   campus_apply
 }
 
 campus_reset() {
-  campus_load
+  campus_load "$1"
   pve_ssh "systemctl disable --now $CAMPUS_UNIT >/dev/null 2>&1 || true
 nft delete table inet $CAMPUS_TABLE >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/$CAMPUS_UNIT.service $CAMPUS_RULES $CAMPUS_OPEN
@@ -134,6 +134,6 @@ systemctl daemon-reload" || die "could not remove the campus rules on $PVE_SSH"
 }
 
 campus_status() {
-  campus_load
+  campus_load "$1"
   campus_show
 }

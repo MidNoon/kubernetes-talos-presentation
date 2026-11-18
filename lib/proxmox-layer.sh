@@ -371,7 +371,7 @@ proxmox_pin_ssh() {
 
 proxmox_verify() {
   local version permissions privilege missing=() storage status flags egress
-  pve_load_target || exit 1
+  LAB_PVE_TARGET="$PROXMOX_TARGET" pve_load_target || exit 1
   version="$(pve_api GET /version)" || exit 1
   version="$(jq -er .data.version <<<"$version")" || die "Proxmox returned an unreadable version"
   [[ "$version" == 9.* ]] || die "expected Proxmox 9.x, API token reached version $version"
@@ -412,7 +412,7 @@ proxmox_up() {
   proxmox_ensure_vm
   proxmox_wait_for_api
   proxmox_pin_ssh
-  if ! { [[ -r "$PROXMOX_TARGET" ]] && pve_load_target && pve_api GET /version >/dev/null 2>&1; }; then
+  if ! { [[ -r "$PROXMOX_TARGET" ]] && LAB_PVE_TARGET="$PROXMOX_TARGET" pve_load_target && pve_api GET /version >/dev/null 2>&1; }; then
     proxmox_bootstrap_api
   fi
   proxmox_verify

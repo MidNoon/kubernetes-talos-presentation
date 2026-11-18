@@ -8,6 +8,7 @@ source "$LAB_ROOT/lib/common.sh"
 source "$LAB_ROOT/lib/pve-api.sh"
 source "$LAB_ROOT/lib/cloudflare.sh"
 source "$LAB_ROOT/lib/proxmox-layer.sh"
+source "$LAB_ROOT/lib/hosts-layer.sh"
 source "$LAB_ROOT/lib/host-layer.sh"
 source "$LAB_ROOT/lib/seats-layer.sh"
 source "$LAB_ROOT/lib/rehearsal-layer.sh"
@@ -19,13 +20,17 @@ source "$LAB_ROOT/lib/campus-layer.sh"
 
 usage() {
   cat >&2 <<'EOF'
-usage: lab access up|serve|target|down
-       lab access verify [host-key-fingerprint]
-       lab access ssh [command...]
-       lab campus [ssh|proxmox open|close]
-       lab campus close|reset
+usage: lab hosts
+       lab hosts add <host> <index> <seats>
+       lab hosts seats <host> <seats>
+       lab hosts remove <host>
+       lab access up|serve|target|down <host>
+       lab access verify <host> [host-key-fingerprint]
+       lab access ssh <host> [command...]
+       lab campus <host> [ssh|proxmox open|close]
+       lab campus <host> close|reset
        lab proxmox up|verify|down
-       lab host up|verify|down
+       lab host up|verify|down [host]
        lab seats create <count>|delete
        lab seat <number> up|upgrade|reset|delete
        lab seat <number> failover [worker-a|worker-b]
@@ -34,48 +39,58 @@ EOF
 }
 
 main() {
-  (($# >= 2)) || [[ "${1:-}" == campus ]] || usage
+  (($# >= 1)) || usage
   case "$1" in
-    access)
-      case "$2" in
-        up)
-          (($# == 2)) || usage
+    hosts)
+      case "$#:${2:-}" in
+        1:) hosts_list ;;
+        5:add)
           lab_lock "$*"
-          access_up
+          hosts_add "$3" "$4" "$5"
+          ;;
+        4:seats)
+          lab_lock "$*"
+          hosts_set_seats "$3" "$4"
+          ;;
+        3:remove)
+          lab_lock "$*"
+          hosts_remove "$3"
+          ;;
+        *) usage ;;
+      esac
+      ;;
+    access)
+      (($# >= 3)) || usage
+      case "$2" in
+        up | target | down)
+          (($# == 3)) || usage
+          lab_lock "$*"
+          "access_$2" "$3"
           ;;
         verify)
-          (($# <= 3)) || usage
+          (($# <= 4)) || usage
           lab_lock "$*"
-          access_verify "${3:-}"
+          access_verify "$3" "${4:-}"
+          ;;
+        serve)
+          (($# == 3)) || usage
+          access_serve "$3"
           ;;
         ssh)
           shift 2
           access_ssh "$@"
           ;;
-        serve)
-          (($# == 2)) || usage
-          access_serve
-          ;;
-        target)
-          (($# == 2)) || usage
-          lab_lock "$*"
-          access_target
-          ;;
-        down)
-          (($# == 2)) || usage
-          lab_lock "$*"
-          access_down
-          ;;
         *) usage ;;
       esac
       ;;
     campus)
+      (($# >= 2)) || usage
       lab_lock "$*"
-      case "$#:${2:-}" in
-        1:) campus_status ;;
-        2:close) campus_close ;;
-        2:reset) campus_reset ;;
-        3:*) campus_set "$2" "$3" ;;
+      case "$#:${3:-}" in
+        2:) campus_status "$2" ;;
+        3:close) campus_close "$2" ;;
+        3:reset) campus_reset "$2" ;;
+        4:*) campus_set "$2" "$3" "$4" ;;
         *) usage ;;
       esac
       ;;
@@ -90,19 +105,17 @@ main() {
       esac
       ;;
     host)
-      (($# == 2)) || usage
+      (($# == 2 || $# == 3)) || usage
       lab_lock "$*"
       case "$2" in
-        up) host_up ;;
-        verify)
-          host_load_config
-          host_verify
-          ;;
-        down) host_down ;;
+        up) host_up "${3:-}" ;;
+        verify) host_verify_hosts "${3:-}" ;;
+        down) host_down "${3:-}" ;;
         *) usage ;;
       esac
       ;;
     seats)
+      (($# >= 2)) || usage
       lab_lock "$*"
       case "$2" in
         create)

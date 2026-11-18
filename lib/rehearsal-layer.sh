@@ -16,8 +16,12 @@ lab_kubectl() {
 }
 
 rehearsal_load() {
-  host_load_config
+  local name
+  lab_load_config
   seat_use "$1"
+  name="$(seat_host_of "$SEAT")" || true
+  [[ -n "$name" ]] || die "$SEAT_NAME is not placed on any host, run ./lab seats create first"
+  host_load "$name"
   [[ -s "$SEAT_STATE/omni-service-account.key" ]] || die "$SEAT_NAME does not exist, run ./lab seats create first"
 }
 

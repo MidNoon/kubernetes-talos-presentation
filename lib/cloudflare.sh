@@ -6,27 +6,32 @@ LAB_TUNNEL_HOSTNAME=""
 CF_LAB_TUNNEL_ID=""
 CF_LAB_DNS_RECORD_ID=""
 CF_LAB_DNS_RECORD_CONTENT=""
+CF_ACCESS_INDEX=""
 CF_ACCESS_APP_ID=""
 CF_ACCESS_TOKEN_ID=""
 
 cf_tunnel_name_owned() {
-  [[ "$1" == talos-lab-host || "$1" =~ ^talos-student-[0-9]{2}$ ]]
+  [[ "$1" =~ ^talos-lab-host-[0-9]$ || "$1" =~ ^talos-student-[0-9]{2}$ ]]
 }
 
 cf_hostname_owned() {
-  [[ "$1" =~ ^((team|omni|kube|shell)[0-9]{2}|auth|pve)\. && "${1#*.}" == "$LAB_TUNNEL_ZONE" ]]
+  [[ "$1" =~ ^((team|omni|kube|shell)[0-9]{2}|auth|pve[0-9])\. && "${1#*.}" == "$LAB_TUNNEL_ZONE" ]]
+}
+
+cf_access_name() {
+  printf '%s-%s' "$CF_ACCESS_NAME" "$CF_ACCESS_INDEX"
 }
 
 cf_access_hostname() {
-  printf 'ssh.%s' "$LAB_TUNNEL_ZONE"
+  printf 'ssh%s.%s' "$CF_ACCESS_INDEX" "$LAB_TUNNEL_ZONE"
 }
 
 cf_access_owns_tunnel() {
-  [[ "$1" == "$CF_ACCESS_NAME" ]]
+  [[ "$1" =~ ^talos-lab-access-[0-9]$ ]]
 }
 
 cf_access_owns_hostname() {
-  [[ "$1" == "$(cf_access_hostname)" ]]
+  [[ "$1" =~ ^ssh[0-9]\. && "${1#*.}" == "$LAB_TUNNEL_ZONE" ]]
 }
 
 cf_assert_allowed() {
@@ -36,7 +41,8 @@ cf_assert_allowed() {
         list) return 0 ;;
         create)
           if [[ $# == 6 && "${5:-}" == --body ]] &&
-            jq -e --arg name "$CF_ACCESS_NAME" --arg domain "$(cf_access_hostname)" \
+            [[ "$CF_ACCESS_INDEX" =~ ^[0-9]$ ]] &&
+            jq -e --arg name "$(cf_access_name)" --arg domain "$(cf_access_hostname)" \
               '.name == $name and .domain == $domain and .type == "self_hosted"' <<<"${6:-}" >/dev/null 2>&1; then
             return 0
           fi
@@ -55,7 +61,7 @@ cf_assert_allowed() {
       return 0
       ;;
     "tunnels create --name")
-      { cf_tunnel_name_owned "${4:-}" || cf_access_owns_tunnel "${4:-}"; } && [[ "${4:-}" == "$LAB_TUNNEL_NAME" && "${5:-}" == --config-source && "${6:-}" == cloudflare ]] && return 0
+      { cf_tunnel_name_owned "${4:-}" || { cf_access_owns_tunnel "${4:-}" && [[ "${4:-}" == "$(cf_access_name)" ]]; }; } && [[ "${4:-}" == "$LAB_TUNNEL_NAME" && "${5:-}" == --config-source && "${6:-}" == cloudflare ]] && return 0
       ;;
     "tunnels token get" | "tunnels config update" | "tunnels connections cleanup" | "tunnels connections list")
       [[ -n "$CF_LAB_TUNNEL_ID" && "${4:-}" == "$CF_LAB_TUNNEL_ID" ]] && return 0
@@ -68,7 +74,7 @@ cf_assert_allowed() {
       ;;
     "dns records create")
       if [[ "${4:-}" == -z && "${5:-}" == "$LAB_TUNNEL_ZONE" && "${6:-}" == --body ]] &&
-        { cf_hostname_owned "$LAB_TUNNEL_HOSTNAME" || cf_access_owns_hostname "$LAB_TUNNEL_HOSTNAME"; } &&
+        { cf_hostname_owned "$LAB_TUNNEL_HOSTNAME" || { cf_access_owns_hostname "$LAB_TUNNEL_HOSTNAME" && [[ "$LAB_TUNNEL_HOSTNAME" == "$(cf_access_hostname)" ]]; }; } &&
         jq -e --arg host "$LAB_TUNNEL_HOSTNAME" '.name == $host and .type == "CNAME"' <<<"${7:-}" >/dev/null 2>&1; then
         return 0
       fi
@@ -168,7 +174,7 @@ cf_snapshot_access_others() {
   tokens="$(cf_query zero-trust access service-tokens list --per-page 1000)" || return 1
   {
     [[ -z "$base" ]] || printf '%s\n' "$base"
-    cf_results <<<"$apps" | jq -r --arg name "$CF_ACCESS_NAME" 'select(.name != $name) | "access-app \(.id) \(.name) \(.domain // "")"'
+    cf_results <<<"$apps" | jq -r 'select(.name | test("^talos-lab-access-[0-9]$") | not) | "access-app \(.id) \(.name) \(.domain // "")"'
     cf_results <<<"$tokens" | jq -r --arg name "$CF_ACCESS_NAME" 'select(.name != $name) | "service-token \(.id) \(.name)"'
   } | sort
 }
@@ -179,10 +185,10 @@ cf_lookup_access() {
   CF_ACCESS_TOKEN_ID=""
   apps="$(cf_query zero-trust access applications list)" || return 1
   tokens="$(cf_query zero-trust access service-tokens list --per-page 1000)" || return 1
-  CF_ACCESS_APP_ID="$(cf_results <<<"$apps" | jq -r --arg name "$CF_ACCESS_NAME" 'select(.name == $name) | .id')" || return 1
+  CF_ACCESS_APP_ID="$(cf_results <<<"$apps" | jq -r --arg name "$(cf_access_name)" 'select(.name == $name) | .id')" || return 1
   CF_ACCESS_TOKEN_ID="$(cf_results <<<"$tokens" | jq -r --arg name "$CF_ACCESS_NAME" 'select(.name == $name) | .id')" || return 1
   if (($(grep -c . <<<"$CF_ACCESS_APP_ID" || true) > 1 || $(grep -c . <<<"$CF_ACCESS_TOKEN_ID" || true) > 1)); then
-    fail "found more than one Access application or service token named $CF_ACCESS_NAME"
+    fail "found more than one Access application named $(cf_access_name) or service token named $CF_ACCESS_NAME"
     return 1
   fi
 }
@@ -195,6 +201,22 @@ cf_owned_hostnames() {
       printf '%s\n' "$name"
     fi
   done | sort -u
+}
+
+cf_owned_records() {
+  local records
+  records="$(cf_query dns records list -z "$LAB_TUNNEL_ZONE" --per-page 5000)" || return 1
+  cf_results <<<"$records" | jq -r '[.name, .content] | @tsv' | while IFS=$'\t' read -r name content; do
+    if cf_hostname_owned "$name"; then
+      printf '%s %s\n' "$name" "$content"
+    fi
+  done | sort -u
+}
+
+cf_access_app_count() {
+  local apps
+  apps="$(cf_query zero-trust access applications list)" || return 1
+  cf_results <<<"$apps" | jq -r 'select(.name | test("^talos-lab-access-[0-9]$")) | .name' | grep -c . || true
 }
 
 cf_owned_tunnels() {

@@ -4,12 +4,16 @@ readonly PVE_API_ROLES=PVEVMAdmin,PVEDatastoreAdmin,PVESDNUser,PVEPoolAdmin
 readonly PVE_SSH_ATTEMPTS=4
 readonly PVE_SSH_BEFORE_SESSION='mux_client_request_session|Control socket connect|kex_exchange_identification|websocket: bad handshake|Connection closed by UNKNOWN|during banner exchange|Connection timed out'
 
+PVE_ACCESS_MASTERS=()
+
 pve_load_target() {
-  local target="${LAB_PVE_TARGET:-$LAB_STATE/pve-target.env}" var
-  [[ -r "$target" ]] || {
-    fail "Proxmox target file not readable: $target"
+  local target="${LAB_PVE_TARGET:-}" var
+  [[ -n "$target" && -r "$target" ]] || {
+    fail "Proxmox target file not readable: ${target:-none selected}"
     return 1
   }
+  unset PVE_URL PVE_NODE PVE_TOKEN_ID PVE_TOKEN_SECRET PVE_TLS_PIN PVE_DISK_STORAGE PVE_SSH PVE_SSH_KEY PVE_SSH_KNOWN_HOSTS PVE_SSH_ACCESS
+  PVE_TARGET_FILE="$target"
   source "$target"
   for var in PVE_URL PVE_NODE PVE_TOKEN_ID PVE_TOKEN_SECRET PVE_TLS_PIN PVE_DISK_STORAGE PVE_SSH PVE_SSH_KEY PVE_SSH_KNOWN_HOSTS; do
     [[ -n "${!var:-}" ]] || {
@@ -23,11 +27,11 @@ pve_load_target() {
 }
 
 pve_access_master() {
-  printf '%s/access/master' "$LAB_STATE"
+  printf '%s/api-master' "${PVE_TARGET_FILE%/*}"
 }
 
 pve_access_env() {
-  local cloudflared="$LAB_STATE/host/bin/cloudflared"
+  local cloudflared="$LAB_STATE/shared/bin/cloudflared"
   [[ -r "$PVE_SSH_ACCESS" ]] || {
     fail "Cloudflare Access service token not readable at $PVE_SSH_ACCESS, run ./lab access up"
     return 1
@@ -49,18 +53,21 @@ pve_access_open() {
     return 1
   }
   port="${BASH_REMATCH[1]}"
-  mkdir -p "$LAB_STATE/access"
   pve_ssh_forward_open "$(pve_access_master)" "127.0.0.1:$port:127.0.0.1:8006" || {
     fail "could not reach $PVE_SSH through Cloudflare Access with a forward from 127.0.0.1:$port to its API"
     return 1
   }
   if ((BASHPID == $$)); then
+    PVE_ACCESS_MASTERS+=("$(pve_access_master)")
     lab_on_exit pve_access_close
   fi
 }
 
 pve_access_close() {
-  pve_ssh_forward_close "$(pve_access_master)"
+  local master
+  for master in "${PVE_ACCESS_MASTERS[@]}"; do
+    pve_ssh_forward_close "$master"
+  done
 }
 
 pve_ssh_options() {
@@ -75,7 +82,7 @@ pve_ssh_options() {
   if [[ -n "${PVE_SSH_ACCESS:-}" ]]; then
     PVE_SSH_OPTIONS+=(
       -o ConnectTimeout=30
-      -o "ProxyCommand=$(printf '%q' "$LAB_STATE/host/bin/cloudflared") access ssh --hostname %h"
+      -o "ProxyCommand=$(printf '%q' "$LAB_STATE/shared/bin/cloudflared") access ssh --hostname %h"
       -o ControlPath=none
     )
   else

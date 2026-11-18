@@ -271,7 +271,7 @@ EOF
 }
 
 seat_render_omni_config() {
-  jq -n --arg secret "$(<"$HOST_STATE/dex-client-secret")" '{auth: {oidc: {clientSecret: $secret}}}'
+  jq -n --arg secret "$(<"$SHARED_STATE/dex-client-secret")" '{auth: {oidc: {clientSecret: $secret}}}'
 }
 
 seat_capture_failure() {
@@ -435,6 +435,7 @@ seat_render_readme() {
   sed -E \
     -e "s/<class domain>/$LAB_TUNNEL_ZONE/g" \
     -e "s/\b(seat|shell|omni|team|kube|student)NN\b/\1$SEAT/g" \
+    -e "s/pve<host>/$(host_pve_label)/g" \
     -e "s/\`NN\`/\`$SEAT\`/g" \
     "$LAB_ROOT/docs/hands-on.md"
 }
@@ -445,7 +446,7 @@ seat_render_seat_info() {
     --arg email "$SEAT_EMAIL" \
     --arg password "$(host_user_password "$SEAT_USER")" \
     --arg omni "https://$SEAT_OMNI_HOST" \
-    --arg proxmox "https://$(host_name pve)" \
+    --arg proxmox "https://$(host_name "$(host_pve_label)")" \
     --arg site "https://$SEAT_SITE_HOST" \
     --arg talos "$LAB_TALOS_UPGRADE_VERSION" \
     --arg kubernetes "$LAB_KUBERNETES_UPGRADE_VERSION" \
@@ -596,7 +597,7 @@ seat_write_sheet() {
     printf 'Password   %s\n' "$(host_user_password "$SEAT_USER")"
     printf 'Workspace  https://%s\n' "$SEAT_SHELL_HOST"
     printf 'Omni       https://%s\n' "$SEAT_OMNI_HOST"
-    printf 'Proxmox    https://%s\n' "$(host_name pve)"
+    printf 'Proxmox    https://%s\n' "$(host_name "$(host_pve_label)")"
     printf 'Site       https://%s\n' "$SEAT_SITE_HOST"
   } >"$SEAT_STATE/sheet.txt"
 }
@@ -618,40 +619,50 @@ seat_create() {
 }
 
 seats_create() {
-  local count="${1:-}" number before after
+  local count="${1:-}" number before after name numbers
   if [[ ! "$count" =~ ^[1-9][0-9]*$ ]] || ((count > SEAT_MAX)); then
     die "seats create needs a count from 1 to $SEAT_MAX, got \"$count\""
   fi
-  host_load_config
-  [[ -s "$HOST_STATE/dex-client-secret" && -s "$HOST_STATE/host-dns" ]] || die "run ./lab host up first"
+  lab_load_config
+  hosts_require_primary
+  [[ -s "$SHARED_STATE/dex-client-secret" ]] || die "run ./lab host up first"
+  for ((number = 1; number <= count; number++)); do
+    seat_place "$number"
+  done
+  for name in $(hosts_names); do
+    [[ -z "$(host_seats_on "$name")" || -s "$LAB_HOSTS_STATE/$name/host-dns" ]] || die "seats are placed on $name, run ./lab host up $name first"
+  done
+  host_load "$(hosts_primary)"
   before="$(cf_snapshot_others)" || exit 1
   for ((number = 1; number <= count; number++)); do
     seat_use "$number"
-    mkdir -p "$SEAT_STATE"
     host_ensure_user "$SEAT_USER"
   done
   host_install_dex
-  host_sync_tunnel
   seat_build_guide
-  for ((number = 1; number <= count; number++)); do
-    seat_create "$number"
+  for name in $(hosts_names); do
+    numbers="$(host_seats_on "$name" | awk -v count="$count" '$1 + 0 <= count')"
+    [[ -n "$numbers" ]] || continue
+    host_switch "$name"
+    host_sync_tunnel
+    for number in $numbers; do
+      seat_create "$number"
+    done
+    host_verify
   done
-  host_verify
   after="$(cf_snapshot_others)" || exit 1
   [[ "$before" == "$after" ]] || die "other Cloudflare resources changed while creating seats. Before: $before. After: $after"
-  log "$count seats ready, sheets in $LAB_SEATS_STATE/seatNN/sheet.txt"
+  log "$count seats ready, hosts holding $(hosts_capacity), sheets in $LAB_SEATS_STATE/seatNN/sheet.txt"
 }
 
 seat_remote_numbers() {
-  local vnets tunnels storages
+  local vnets storages
   vnets="$(pve_ssh "pvesh get /cluster/sdn/vnets --output-format json" | jq -r --arg zone "$HOST_SDN_ZONE" '.[] | select(.zone == $zone) | .vnet')" || return 1
   storages="$(pve_api GET /storage | jq -r '.data[].storage')" || return 1
-  tunnels="$(cf_owned_tunnels)" || return 1
   {
     sed -n 's/^seat\([0-9][0-9]\)-iso$/\1/p' <<<"$storages"
     sed -n 's/^seat\([0-9][0-9]\)$/\1/p' <<<"$vnets"
-    sed -n 's/^talos-student-\([0-9][0-9]\)$/\1/p' <<<"$tunnels"
-    host_seat_numbers
+    host_seats_on "$HOST_NAME"
   } | sort -u
 }
 
@@ -702,7 +713,7 @@ subnet_id="$ZONE-${SUBNET/\//-}"
 if pvesm status --storage "$STORAGE" >/dev/null 2>&1; then
   pvesm remove "$STORAGE"
 fi
-rm -rf "$DIR"
+rm -rf "${DIR:?}"
 pveum user list --output-format json | grep -q "\"userid\":\"$USER_ID\"" && pveum user delete "$USER_ID"
 pveum pool list --output-format json | grep -q "\"poolid\":\"$POOL\"" && pveum pool delete "$POOL"
 changed=false
@@ -725,38 +736,63 @@ EOF
     tunnel_remove || exit 1
   ) || exit 1
   host_remove_user "$SEAT_USER"
-  rm -rf "$SEAT_STATE"
+  rm -rf "${SEAT_STATE:?}"
   log "$SEAT_NAME removed"
 }
 
-seats_delete() {
-  local numbers number before after leftovers
-  host_load_config
-  before="$(cf_snapshot_others)" || exit 1
-  numbers="$(seat_remote_numbers)" || die "could not list existing seats"
-  for number in $numbers; do
-    seat_delete "$number"
+seats_remove_stray_tunnels() {
+  local tunnel number
+  for tunnel in $(cf_owned_tunnels | grep -E '^talos-student-[0-9]{2}$'); do
+    number="${tunnel#talos-student-}"
+    [[ -d "$LAB_SEATS_STATE/seat$number" ]] && continue
+    (
+      LAB_TUNNEL_NAME="$tunnel"
+      LAB_TUNNEL_HOSTNAME="$(host_name "team$number")"
+      tunnel_remove_dns || exit 1
+      tunnel_remove || exit 1
+    ) || exit 1
   done
+}
+
+seats_delete() {
+  local numbers number before after leftovers=() name
+  lab_load_config
+  hosts_require_primary
+  host_load "$(hosts_primary)"
+  before="$(cf_snapshot_others)" || exit 1
+  for name in $(hosts_names); do
+    [[ -s "$LAB_HOSTS_STATE/$name/target.env" ]] || continue
+    host_switch "$name"
+    numbers="$(seat_remote_numbers)" || die "could not list the seats on $name"
+    for number in $numbers; do
+      seat_delete "$number"
+    done
+    [[ ! -s "$HOST_STATE/connector-token" ]] || host_sync_tunnel
+    numbers="$(seat_remote_numbers)" || die "could not list the seats on $name after deleting them"
+    [[ -z "$numbers" ]] || leftovers+=("$name: $(paste -sd' ' <<<"$numbers")")
+  done
+  seats_remove_stray_tunnels
   host_install_dex
-  host_sync_tunnel
-  leftovers="$(seat_remote_numbers)" || die "could not list seats after deleting them"
-  [[ -z "$leftovers" ]] || die "seats left behind: $(paste -sd' ' <<<"$leftovers")"
+  ((${#leftovers[@]} == 0)) || die "seats left behind: ${leftovers[*]}"
   after="$(cf_snapshot_others)" || exit 1
   [[ "$before" == "$after" ]] || die "other Cloudflare resources changed while deleting seats. Before: $before. After: $after"
   log "all seats removed, other tunnels and DNS records unchanged"
 }
 
 seat_remove() {
-  local before after leftovers
-  host_load_config
+  local before after leftovers name
+  lab_load_config
+  name="$(seat_host_of "$1")" || true
+  [[ -n "$name" ]] || die "seat $1 is not placed on any host"
+  host_load "$name"
   seat_use "$1"
   before="$(cf_snapshot_others)" || exit 1
   seat_delete "$SEAT"
-  host_install_dex
   host_sync_tunnel
+  host_install_dex
   leftovers="$(seat_remote_numbers)" || die "could not list seats after removing $SEAT_NAME"
-  ! grep -qxF "$SEAT" <<<"$leftovers" || die "$SEAT_NAME left resources behind"
+  ! grep -qxF "$SEAT" <<<"$leftovers" || die "$SEAT_NAME left resources behind on $HOST_NAME"
   after="$(cf_snapshot_others)" || exit 1
   [[ "$before" == "$after" ]] || die "other Cloudflare resources changed while removing $SEAT_NAME. Before: $before. After: $after"
-  log "$SEAT_NAME removed, other seats, tunnels and DNS records unchanged"
+  log "$SEAT_NAME removed from $HOST_NAME, other seats, tunnels and DNS records unchanged"
 }
