@@ -552,7 +552,7 @@ talos_lab_address() {
     printf '%s\t%s.internal %s\n' "$new_ip_address" "$name" "$name" >>"$hosts"
   fi
   logger -t talos-lab "address of $name changed from ${current:-none} to $new_ip_address, restarting pve-cluster and reloading SDN"
-  systemd-run --no-block --quiet --collect --property=After=pve-cluster.service /bin/sh -c 'systemctl try-restart pve-cluster && pvesh set /cluster/sdn'
+  systemd-run --no-block --quiet --collect --property=After=pve-cluster.service /bin/sh -c 'systemctl restart pve-cluster && pvesh set /cluster/sdn'
 }
 talos_lab_address
 EOF

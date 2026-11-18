@@ -51,6 +51,9 @@ function hasKubeconfig() {
 
 async function kubectlJson(args) {
   const result = await run('kubectl', [...args, '-o', 'json']);
+  if (!result.ok && /provide credentials|Unauthorized/i.test(result.stderr)) {
+    throw Object.assign(new Error('Your cluster login has expired. Run connect again'), { plain: true });
+  }
   if (!result.ok) throw new Error(firstLine(result.stderr));
   return JSON.parse(result.stdout);
 }
@@ -193,7 +196,7 @@ async function runChecks(seat, ids) {
       try {
         results[id] = await CHECKS[id](seat);
       } catch (error) {
-        results[id] = { done: false, text: `Not reachable yet: ${error.message}` };
+        results[id] = { done: false, text: error.plain ? error.message : `Not reachable yet: ${error.message}` };
       }
     }),
   );

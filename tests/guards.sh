@@ -635,7 +635,7 @@ test_address_hook_follows_a_new_dhcp_address() {
   printf '#!/bin/sh\necho "$*" >>"%s/systemd-run"\n' "$WORK" >"$bin/systemd-run"
   chmod 755 "$bin"/*
   host_render_address_hook | sed "s|^  hosts=/etc/hosts\$|  hosts=$hosts|" >"$hook"
-  run_hook() { (export PATH="$bin:$PATH" reason="$1" new_ip_address="$2" && sh -c ". '$hook'"); }
+  run_hook() { env PATH="$bin:$PATH" reason="$1" new_ip_address="$2" sh -c ". '$hook'"; }
   printf '127.0.0.1\tlocalhost\n10.1.2.3\tsite-host.internal site-host\n::1 localhost\n' >"$hosts"
   run_hook RENEW 10.1.2.3 || return 1
   [[ ! -e "$WORK/systemd-run" ]] || return 1
@@ -671,6 +671,16 @@ test_campus_refuses_a_host_reached_without_access() {
   printf 'LAB_CF_ACCOUNT_ID=acct\nLAB_TUNNEL_ZONE=zone.example\nLAB_OMNI_EULA_NAME=n\nLAB_OMNI_EULA_EMAIL=e\n' >"$WORK/lab.env"
   ! (LAB_CONFIG="$WORK/lab.env" LAB_PVE_TARGET="$WORK/direct.env" campus_load) 2>"$WORK/err" || return 1
   grep -qF 'need a target reached through Cloudflare Access' "$WORK/err"
+}
+
+test_guide_says_to_connect_again_when_the_login_expires() {
+  local bin="$WORK/kube-bin" text
+  mkdir -p "$bin" "$WORK/home/.kube"
+  : >"$WORK/home/.kube/config"
+  printf '#!/bin/sh\necho "E1118 memcache.go:381] Couldn'"'"'t get current server API group list err=the server has asked for the client to provide credentials" >&2\nexit 1\n' >"$bin/kubectl"
+  chmod 755 "$bin/kubectl"
+  text="$(HOME="$WORK/home" PATH="$bin:$PATH" node -e 'require(process.argv[1]).runChecks({}, ["nodes"]).then((r) => console.log(r.nodes.text))' "$LAB_ROOT/workspace/lab-guide/status.js")" || return 1
+  [[ "$text" == "Your cluster login has expired. Run connect again" ]]
 }
 
 passed=0

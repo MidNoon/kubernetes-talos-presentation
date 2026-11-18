@@ -188,7 +188,7 @@ connect
 kubectl get nodes
 ```
 
-`connect` is a small helper made for this lab. It asks your Omni for a kubeconfig, the file that tells `kubectl` where your cluster is and how to prove who you are, and saves it as `~/.kube/config`. Outside this lab, you click **Download kubeconfig** on your cluster in Omni instead, and `kubectl` with the `oidc-login` plugin signs you in through your browser.
+`connect` is a small helper made for this lab. It asks your Omni for a kubeconfig, the file that tells `kubectl` where your cluster is and how to prove who you are, and saves it as `~/.kube/config`. That login lasts 24 hours, and the guide tells you when to run `connect` again. Outside this lab, you click **Download kubeconfig** on your cluster in Omni instead, and `kubectl` with the `oidc-login` plugin signs you in through your browser.
 
 You should see three nodes, all `Ready`.
 

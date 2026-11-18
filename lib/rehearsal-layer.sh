@@ -238,6 +238,7 @@ rehearsal_use_cluster() {
   clusters="$(rehearsal_cluster_names)" || exit 1
   grep -qxF "$SEAT_CLUSTER" <<<"$clusters" || die "$SEAT_NAME has no cluster $SEAT_CLUSTER, run ./lab seat $SEAT up first"
   rehearsal_fetch_kubeconfig
+  rehearsal_student "connect again" 'connect'
 }
 
 rehearsal_student() {
