@@ -82,6 +82,8 @@ load_libs() {
   source "$LAB_ROOT/lib/failover-layer.sh"
   source "$LAB_ROOT/lib/upgrade-layer.sh"
   source "$LAB_ROOT/lib/access-layer.sh"
+  source "$LAB_ROOT/lib/install-layer.sh"
+  source "$LAB_ROOT/lib/local-layer.sh"
   source "$LAB_ROOT/lib/campus-layer.sh"
   LAB_STATE="$WORK/state"
   SHARED_STATE="$LAB_STATE/shared"
@@ -804,6 +806,71 @@ test_guide_links_each_seat_to_its_hosts_proxmox() {
   seat_use 5
   readme="$(seat_render_readme)" || return 1
   grep -qF 'https://pve1.zone.example' <<<"$readme" && ! grep -qF 'pve<host>' <<<"$readme"
+}
+
+test_install_script_reports_every_key_the_lab_reads() {
+  local state key
+  state="$(bash "$LAB_ROOT/tools/proxmox-install.sh" status 2>/dev/null)" || return 1
+  for key in debian kernel pve_kernel proxmox network revert_armed dhclient uplink; do
+    grep -qE "^$key=" <<<"$state" || return 1
+  done
+  ! bash "$LAB_ROOT/tools/proxmox-install.sh" reinstall-everything 2>/dev/null
+}
+test_install_status_values_are_read_by_key() {
+  local state=$'debian=trixie\nkernel=pve\nnetwork=ifupdown2\nuplink=ens18 address=10.0.0.5'
+  [[ "$(install_value kernel "$state") $(install_value network "$state") $(install_value uplink "$state")" == "pve ifupdown2 ens18" ]] || return 1
+  [[ -z "$(install_value proxmox "$state")" ]]
+}
+
+test_local_seed_hands_the_vm_its_host_key_and_bootstrap() {
+  local data
+  add_test_host home 1 2
+  host_select home
+  CF_ACCESS_INDEX=1
+  mkdir -p "$(local_dir)" "$(access_host_state)"
+  ssh-keygen -q -t ed25519 -N '' -C home -f "$(local_dir)/ssh_host_ed25519_key"
+  printf 'abcd-efgh-jkmn\n' >"$(local_dir)/root-password"
+  printf '#!/usr/bin/env bash\nset -- %s\necho bootstrap\n' "'key' '$LONG_CONNECTOR_TOKEN'" >"$(access_host_state)/bootstrap.sh"
+  data="$(local_render_user_data)" || return 1
+  uv run --quiet --with pyyaml python -I -c '
+import sys, yaml
+d = yaml.safe_load(sys.stdin)
+assert d["hostname"] == "home" and d["ssh_pwauth"] is False and d["manage_etc_hosts"] is False
+assert d["ssh_keys"]["ed25519_private"].startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+assert d["write_files"][0]["content"].splitlines()[2] == "echo bootstrap"
+assert ["touch", "/etc/cloud/cloud-init.disabled"] in d["runcmd"]
+' <<<"$data" || return 1
+  local_ensure_keys 2>/dev/null || return 1
+  [[ "$(cat "$(access_known_hosts)")" == "ssh1.zone.example $(cut -d' ' -f1,2 "$(local_dir)/ssh_host_ed25519_key.pub")" ]]
+}
+
+test_host_lists_succeed_under_set_e_when_the_last_seat_is_elsewhere() {
+  add_test_host home 1 2
+  mkdir -p "$LAB_SEATS_STATE/seat01" "$LAB_SEATS_STATE/seat02"
+  printf 'home\n' >"$LAB_SEATS_STATE/seat01/host"
+  printf 'campus\n' >"$LAB_SEATS_STATE/seat02/host"
+  lab_strict "$(
+    cat <<'EOF'
+add_test_host() { mkdir -p "$LAB_HOSTS_STATE/$1"; printf 'HOST_INDEX=%s\nHOST_SEATS=%s\n' "$2" "$3" >"$LAB_HOSTS_STATE/$1/host.env"; }
+add_test_host azure 2 4
+seats="$(host_seats_on home)"
+primary="$(hosts_primary)"
+none="$(seat_host_of 7)"
+all="$(lab_seat_numbers)"
+printf '%s|%s|%s|%s\n' "$seats" "$primary" "$none" "$(paste -sd' ' <<<"$all")" >"$FAKE/strict"
+EOF
+  )" || return 1
+  [[ "$(cat "$FAKE/strict")" == "01|campus||01 02" ]]
+}
+
+test_pve_remote_runs_a_dropped_script_again_and_prints_one_result() {
+  local out
+  mkdir -p "$WORK/flaky-bin"
+  PVE_SSH_KEY=key PVE_SSH_KNOWN_HOSTS=known PVE_SSH=root@host
+  fake_flaky_ssh 'Connection to host closed by remote host.' 1
+  out="$(printf 'echo ensure\n' | PATH="$WORK/flaky-bin:$PATH" pve_remote A=1 2>"$WORK/err")" || return 1
+  [[ "$out" == $'echo ensure\nran env A=1  bash -s' && "$(grep -c . "$FAKE/ssh-calls")" == 2 ]] || return 1
+  grep -qF 'running the script again' "$WORK/err"
 }
 
 passed=0

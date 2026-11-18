@@ -24,7 +24,8 @@ Students build a Talos install image in their Omni, have Proxmox download it, ma
 ./lab access ssh <host> [command...]         # a shell or a command on the host, without the run lock
 ./lab campus <host> [ssh|proxmox open|close] # what the host's campus network can reach; no argument shows it
 ./lab campus <host> close|reset              # close every service to campus, or remove the campus rules
-./lab proxmox up|verify|down                 # nested Proxmox VM on the local libvirt host
+./lab local up|down <host>                   # the host as a Debian VM on this machine, isolated from the LAN, reached through Access
+./lab host install <host>                    # Proxmox VE 9 on the host's Debian 13, with its reboots and network handover
 ./lab host up|verify|down [host]             # lab services on one host, or on every host in index order
 ./lab seats create <count>|delete            # per-seat network, Omni, ISO storage, workspace, logins, site tunnel
 ./lab seat <n> up                            # rehearse a student's run: image, template, clones, cluster, the guide's commands
@@ -35,18 +36,22 @@ Students build a Talos install image in their Omni, have Proxmox download it, ma
 
 tools/site-check.sh [host:port ...]          # KVM, gateway, DNS and egress checks on a candidate site host
 tests/guards.sh                              # stubbed guard tests, no real services, needs node and unzip
-shellcheck -s bash -x -e SC1090,SC1091,SC2034,SC2154,SC2016,SC2317,SC2024,SC2029 lab lib/*.sh tests/guards.sh tools/site-check.sh
+shellcheck -s bash -x -e SC1090,SC1091,SC2034,SC2154,SC2016,SC2317,SC2024,SC2029 lab lib/*.sh tests/guards.sh tools/*.sh
 ```
 
-A host joins with `./lab hosts add <host> <index> <seats>`, `./lab access up <host>`, the bootstrap run as root on it, `./lab access verify <host> SHA256:...` and `./lab access target <host>`. A full rehearsal is then `./lab host up`, `./lab seats create 1`, `./lab seat 1 up`, `./lab seat 1 failover`, `./lab seat 1 upgrade`, `./lab seat 1 reset`, `./lab seats delete`, `./lab host down`. On the nested lab it takes about 30 minutes above Proxmox:
+A remote Debian 13 host joins with `./lab hosts add <host> <index> <seats>`, `./lab access up <host>`, the bootstrap run as root on it, `./lab access verify <host> SHA256:...`, `./lab host install <host>` and `./lab access target <host>`. A host on this machine joins with `./lab hosts add <host> <index> <seats>`, `./lab local up <host>`, `./lab host install <host>` and `./lab access target <host>`. A full rehearsal is then `./lab host up`, `./lab seats create 1`, `./lab seat 1 up`, `./lab seat 1 failover`, `./lab seat 1 upgrade`, `./lab seat 1 reset`, `./lab seats delete`, `./lab host down`.
+
+Timings on the home host, a VM on this machine (i9-13900K), with the campus host (a 2012 Xeon) where it differs:
 
 | Step | Time |
 | --- | --- |
-| `host up` | about 30 seconds |
-| `seats create 1` | under a minute |
-| `seat 1 up` | 5 to 8 minutes, including the image download |
+| `local up` | about 20 seconds from start to reachable, once the image is cached |
+| `host install` | about 8 minutes, including two reboots |
+| `host up` | about 3.5 minutes the first time, while the binaries upload through Access; under a minute after |
+| `seats create 1` | about 3 minutes; on campus about 5 |
+| `seat 1 up` | about 9 minutes, including the image download; on campus about 12 |
 | `seat 1 failover` | about 3.5 minutes, including the 120 second image wait |
-| `seat 1 upgrade` | about 10 minutes: Talos 5.5, Kubernetes 3.3 |
+| `seat 1 upgrade` | about 10 minutes; on campus Talos 7.8 and Kubernetes 4.6 |
 | `seat 1 reset` | under 2 minutes |
 | `seats delete` and `host down` | under a minute |
 
@@ -58,7 +63,8 @@ Running `seats create` again leaves running seats untouched, because a seat's Om
 - `lib/common.sh` has the Talos and Kubernetes versions a cluster starts on and is upgraded to, logging, config loading, the lock, exit hooks and `lab_public_curl`.
 - `lib/pve-api.sh` is the Proxmox REST client, root SSH and SSH forwards, the Cloudflare Access transport, and the guest name guards.
 - `lib/cloudflare.sh` is the only path to `cf`, through `cf_query` and its allowlist, plus tunnel and DNS primitives.
-- `lib/proxmox-layer.sh` builds the nested Proxmox VM with libvirt.
+- `lib/local-layer.sh` runs a host as a Debian VM on this machine with libvirt.
+- `lib/install-layer.sh` drives `tools/proxmox-install.sh` on a host through its steps and reboots.
 - `lib/hosts-layer.sh` holds the list of hosts, which one is selected, and where each seat is placed.
 - `lib/access-layer.sh` builds and removes the SSH path to a host through Cloudflare Access, its bootstrap script, and the host's target.
 - `lib/campus-layer.sh` controls what the campus network beside a host can reach on it.
@@ -68,8 +74,8 @@ Running `seats create` again leaves running seats untouched, because a seat's Om
 - `manifests/` holds the Kubernetes manifests students apply unchanged: the site, the tunnel connectors, and the descheduler pinned by digest.
 - `patches/` holds the Talos config patches students paste into Omni when they create the cluster: one for every machine, one for the control plane machine. The rehearsal applies the same files, and a guard test keeps the guide's copies identical.
 - `workspace/lab-guide/` is the code-server extension behind the workspace's **Lab guide** tab. `extension.js` builds the panel from `~/README.md`, sends commands to the `Lab` terminal, copies values and opens links. `status.js` holds the status checks, and `node status.js` prints them all as JSON. A command with `--watch` or `-w` runs in its own `Watch` terminal beside `Lab`. A step stays ticked once its check passes, even if the check later fails, for example during the failover. `media/` holds the panel's script, styles and icon.
-- `docker/pve-assistant/` builds the image that prepares the unattended Proxmox installer.
 - `tools/site-check.sh` runs standalone on a Proxmox host or desktop at a candidate site, with no dependency on the rest of the repo.
+- `tools/proxmox-install.sh` runs as root on a Debian 13 host, one step at a time: `status`, `kernel`, `packages`, `network`, `confirm` and `finalize`.
 - `tools/access-bootstrap.sh` runs standalone as root on a site host with our SSH public key and the tunnel connector token as arguments. A guard test keeps its `cloudflared` pin and paths identical to the lab's.
 - `docs/site-request.md` is the hosting request to hand a site's IT staff: size per seat count, nested virtualization, outbound destinations, remote access options, security, and questions to settle.
 
@@ -84,9 +90,9 @@ The repository is intended to become public. Account IDs, the domain and the EUL
 
 `.lab/` is git-ignored and holds run state:
 - `lock`.
-- `proxmox/` holds the nested lab's ISO, installer and root password, and `ssh/` with its key and known_hosts. `./lab proxmox up` writes the nested target to `pve-target.env`.
+- `local/` caches the pinned Debian cloud image.
 - `shared/` holds what every host uses: the downloaded binaries in `bin/`, the Dex client secrets for Omni and Proxmox, and `users.tsv`.
-- `hosts/<host>/` holds one host: `host.env` with `HOST_INDEX` and `HOST_SEATS`, `target.env`, the host resolver in `host-dns`, the host tunnel token, and the control socket `api-master`. Its `access/` holds the host's known_hosts, its access connector token and its `bootstrap.sh`.
+- `hosts/<host>/` holds one host: `host.env` with `HOST_INDEX` and `HOST_SEATS`, `target.env`, the host resolver in `host-dns`, the host tunnel token, and the control socket `api-master`. Its `access/` holds the host's known_hosts, its access connector token and its `bootstrap.sh`. A host on this machine also has `local/` with the VM's SSH host key, its root password for the serial console, and its libvirt domain.
 - `access/` holds what every host's access shares: the SSH key pair in `ssh/` and the Access service token in `service-token.env`. `access down` keeps the key pair.
 - `seats/seatNN/` holds `host`, the name of the host the seat is placed on, the seat's Omni account ID and etcd key, and its Admin and workspace Operator service account keys. It also holds the site tunnel token, `sheet.txt` (the card to hand the student), and the rehearsal kubeconfig, cluster template and failover runs.
 - `guide/lab-guide.vsix`, the packed guide extension.
@@ -122,7 +128,13 @@ The access layer may write only the selected host's tunnel `talos-lab-access-N`,
 
 ## How the layers work
 
-**Proxmox.** An unattended 9.x install in a libvirt VM with 24 GB RAM, 8 vCPUs and a sparse 200 GB disk. The answer file installs the lab SSH public key for root, and the host key is recorded on first contact after the install. It has its own libvirt network `talos-lab`, bridge `virbr-talos`, subnet `10.77.0.0/24` and storage pool. ufw drops forwarded traffic by default, so the layer adds rules for that bridge only and removes them on teardown.
+**Local.** `./lab local up <host>` runs the host as the libvirt domain `talos-lab-<host>` with 36 GiB, 12 vCPUs passing the CPU through for nested KVM, and a 300 GB thin disk backed by the pinned Debian 13 `generic` cloud image, checked against Debian's SHA-512. It runs `access up` for the host when its connector token is missing. It generates the VM's ed25519 SSH host key here and records it in the host's known_hosts, so no fingerprint has to be read off a console. A cloud-init seed, an ISO labelled `cidata` built with `pycdlib`, gives the VM that host key, a root password, and the host's access bootstrap to run on first boot, after which it disables cloud-init. Once the host answers through `sshN`, the seed is ejected and deleted, because it holds the connector token. The libvirt network `talos-lab` (`virbr-talos`, `10.77.0.0/24`, NAT) is cut off by ufw. Its incoming rules sit at the top of ufw, ahead of this machine's own allow rules such as SSH, so the VM reaches this machine only for DHCP and DNS. Routed traffic to `10.0.0.0/8`, `100.64.0.0/10`, `169.254.0.0/16`, `172.16.0.0/12` and `192.168.0.0/16` is denied before the rule that allows the rest. `./lab local down <host>` removes the domain and its volumes, and the image, pool, network and ufw rules with the last one, and checks every other libvirt domain is unchanged.
+
+**Install.** `./lab host install <host>` copies `tools/proxmox-install.sh` to the host and runs each step as a transient systemd unit with `KillMode=process`, so a dropped connection cannot stop it and the dhclient it starts outlives it, then waits for the step's result file:
+- `kernel` turns off cloud-init's management of `/etc/hosts` and the network, maps the hostname to the host's address, adds the no-subscription repository with the trixie keyring checked against its SHA-256, upgrades, and installs `proxmox-default-kernel`. The host then reboots, and the lab waits for a new boot ID.
+- `packages` installs `proxmox-ve`, postfix as local only, open-iscsi, chrony and isc-dhcp-client, disables the enterprise sources, removes every Debian kernel and os-prober, and disables the dhclient AppArmor profile.
+- `network` hands the uplink to ifupdown2 with DHCP and removes any pending `interfaces.new`. It stops whichever of NetworkManager and systemd-networkd managed the uplink, and systemd-resolved, whose stub resolver seats cannot use. A 5 minute revert timer and a boot fallback that reverts 3 minutes after a boot without a default route guard it. `confirm` cancels the timer once a new connection works, the host reboots, and `finalize` masks the old manager and removes the fallback when the uplink came up on ifupdown2 with dhclient.
+- A host that already runs the Proxmox kernel, `proxmox-ve` or ifupdown2 skips those steps, so the install runs again safely. It ends by checking Proxmox's services, that the hostname resolves to the host's address, and `/dev/kvm`.
 
 **Hosts.** Each host has a name, an index from 0 to 9 and a seat count. The index orders the hosts and names everything that belongs to one: `pveN`, `sshN`, `talos-lab-host-N` and `talos-lab-access-N`. Index 0 runs Dex, so every other host signs in through it, comes up after it and goes down before it. `seats create` places each new seat on the first host, by index, with fewer seats than its count, and records it in the seat's `host`. A seat stays there until it is deleted, and every command on it selects its host first. Lowering a host's count below the seats it holds is refused.
 
@@ -238,7 +250,14 @@ It installs `/etc/dhcp/dhclient-exit-hooks.d/talos-lab`. When DHCP gives the hos
 - `cf` writes a `.cloudflare/` cache containing account details into the working directory, and it is git-ignored.
 - `cloudflared access ssh` reads the service token from `TUNNEL_SERVICE_TOKEN_ID` and `TUNNEL_SERVICE_TOKEN_SECRET`, so the secret stays off the command line. Access asks for a browser login unless the policy's decision is Service Auth (`non_identity`). With only that policy, a request without the token, or with a wrong one, gets 403 before it reaches the tunnel. The service token's secret is shown only when it is created, so `access up` replaces a token whose secret is not in `.lab/access/`.
 - `ssh -S` replaces an earlier `-o ControlPath`, so a seat's Omni forward keeps its own control socket while other SSH calls share the access connection.
-- A new SSH connection through Cloudflare Access takes about a second. A long-lived one can drop, and a command running over a shared connection that drops ends with exit 255 and no message, with no way to tell whether it finished. So only the API forward is long-lived. `pve_ssh` retries a call that failed before its session started, and names the command when it ends with exit 255 otherwise.
+- A new SSH connection through Cloudflare Access takes about a second. A long-lived one can drop, and a command running over a shared connection that drops ends with exit 255 and no message, with no way to tell whether it finished. So only the API forward is long-lived. `pve_ssh` retries a call that failed before its session started, and names the command when it ends with exit 255 otherwise. A connection through Access can also drop in the middle of a long command. Every script passed to `pve_remote` is written to be safe to run again, checking before it creates or changes anything, so `pve_remote` runs a script once more when its connection drops and prints only the output of the run that finished.
+- The Debian 13 cloud images boot with `grub-cloud-amd64`, netplan, systemd-networkd and systemd-resolved, whose stub makes `/etc/resolv.conf` point at `127.0.0.53`. Proxmox's packages pull in `grub-pc`, which fails to configure without an answer for `grub-pc/install_devices`, so on a BIOS boot the `kernel` step preseeds the disk that holds `/`.
+- `/run/network` exists only on a host that booted with ifupdown, and without it ifupdown2 cannot take its lock and reports `Another instance of this program is already running`.
+- systemd-networkd's socket starts networkd again as soon as networkd stops, so the handover masks the socket, the service and `systemd-networkd-wait-online` together.
+- The dhclient AppArmor profile is `/etc/apparmor.d/sbin.dhclient` on some Debian installs and `/etc/apparmor.d/usr.sbin.dhclient` on others.
+- A transient unit's processes are killed when its main process exits, unless it runs with `KillMode=process`.
+- `ifdown` sets the link down, and a running networkd does not bring it back up, so the revert stops dhclient, sets the link up and restarts the old manager instead.
+- cloud-init treats a boot without its datasource as a new instance and regenerates the SSH host keys, so a VM whose seed was removed keeps its key only because cloud-init is disabled after the first boot.
 - In `jq`, `false // x` returns `x`. Compare booleans explicitly when `false` is a meaningful value.
 - Proxmox VE 9 goes on Debian 13 as the Proxmox wiki describes: hostname resolving to the real address in `/etc/hosts`, the no-subscription repository with the trixie keyring, `proxmox-default-kernel` and a reboot, then `proxmox-ve postfix open-iscsi chrony`, then removing the Debian kernels and `os-prober`. The install adds `pve-enterprise.sources`, which fails without a subscription until it is disabled.
 - On Proxmox, ifupdown2 runs `dhclient` for an `inet dhcp` interface, and Debian's AppArmor profile for `dhclient` blocks its unix sockets under the Proxmox kernel, so it exits at once. Disabling that profile through `/etc/apparmor.d/disable/sbin.dhclient` fixes it. Until then, an address left by NetworkManager hides the problem until its lease runs out.

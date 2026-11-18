@@ -7,7 +7,6 @@ LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$LAB_ROOT/lib/common.sh"
 source "$LAB_ROOT/lib/pve-api.sh"
 source "$LAB_ROOT/lib/cloudflare.sh"
-source "$LAB_ROOT/lib/proxmox-layer.sh"
 source "$LAB_ROOT/lib/hosts-layer.sh"
 source "$LAB_ROOT/lib/host-layer.sh"
 source "$LAB_ROOT/lib/seats-layer.sh"
@@ -16,6 +15,8 @@ source "$LAB_ROOT/lib/site-layer.sh"
 source "$LAB_ROOT/lib/failover-layer.sh"
 source "$LAB_ROOT/lib/upgrade-layer.sh"
 source "$LAB_ROOT/lib/access-layer.sh"
+source "$LAB_ROOT/lib/install-layer.sh"
+source "$LAB_ROOT/lib/local-layer.sh"
 source "$LAB_ROOT/lib/campus-layer.sh"
 
 usage() {
@@ -29,7 +30,8 @@ usage: lab hosts
        lab access ssh <host> [command...]
        lab campus <host> [ssh|proxmox open|close]
        lab campus <host> close|reset
-       lab proxmox up|verify|down
+       lab local up|down <host>
+       lab host install <host>
        lab host up|verify|down [host]
        lab seats create <count>|delete
        lab seat <number> up|upgrade|reset|delete
@@ -94,13 +96,12 @@ main() {
         *) usage ;;
       esac
       ;;
-    proxmox)
-      (($# == 2)) || usage
+    local)
+      (($# == 3)) || usage
       lab_lock "$*"
       case "$2" in
-        up) proxmox_up ;;
-        verify) proxmox_verify ;;
-        down) proxmox_down ;;
+        up) local_up "$3" ;;
+        down) local_down "$3" ;;
         *) usage ;;
       esac
       ;;
@@ -108,6 +109,10 @@ main() {
       (($# == 2 || $# == 3)) || usage
       lab_lock "$*"
       case "$2" in
+        install)
+          (($# == 3)) || usage
+          host_install "$3"
+          ;;
         up) host_up "${3:-}" ;;
         verify) host_verify_hosts "${3:-}" ;;
         down) host_down "${3:-}" ;;

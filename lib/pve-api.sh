@@ -111,7 +111,19 @@ pve_ssh() {
 }
 
 pve_remote() {
-  pve_ssh "$(printf '%q ' env "$@") bash -s"
+  local script out status attempt
+  script="$(mktemp)"
+  out="$(mktemp)"
+  cat >"$script"
+  for ((attempt = 1; attempt <= 2; attempt++)); do
+    status=0
+    pve_ssh "$(printf '%q ' env "$@") bash -s" <"$script" >"$out" || status=$?
+    ((status == 255 && attempt < 2)) || break
+    log "the connection to $PVE_SSH dropped during a script, running the script again"
+  done
+  cat "$out"
+  rm -f "$script" "$out"
+  return "$status"
 }
 
 pve_scp() {

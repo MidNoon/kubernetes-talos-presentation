@@ -18,7 +18,9 @@ hosts_names() {
 hosts_primary() {
   local name
   for name in $(hosts_names); do
-    [[ "$(sed -n 's/^HOST_INDEX=//p' "$LAB_HOSTS_STATE/$name/host.env")" == 0 ]] && printf '%s\n' "$name"
+    if [[ "$(sed -n 's/^HOST_INDEX=//p' "$LAB_HOSTS_STATE/$name/host.env")" == 0 ]]; then
+      printf '%s\n' "$name"
+    fi
   done
 }
 
@@ -59,20 +61,26 @@ hosts_require_primary() {
 seat_host_of() {
   local file
   file="$LAB_SEATS_STATE/seat$(printf '%02d' "$((10#$1))")/host"
-  [[ -s "$file" ]] && cat "$file"
+  if [[ -s "$file" ]]; then
+    cat "$file"
+  fi
 }
 
 host_seats_on() {
   local name="$1" dir
   for dir in "$LAB_SEATS_STATE"/seat[0-9][0-9]; do
-    [[ -s "$dir/host" && "$(<"$dir/host")" == "$name" ]] && printf '%s\n' "${dir##*/seat}"
+    if [[ -s "$dir/host" && "$(<"$dir/host")" == "$name" ]]; then
+      printf '%s\n' "${dir##*/seat}"
+    fi
   done
 }
 
 lab_seat_numbers() {
   local dir
   for dir in "$LAB_SEATS_STATE"/seat[0-9][0-9]; do
-    [[ -d "$dir" ]] && printf '%s\n' "${dir##*/seat}"
+    if [[ -d "$dir" ]]; then
+      printf '%s\n' "${dir##*/seat}"
+    fi
   done
 }
 
