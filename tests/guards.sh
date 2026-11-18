@@ -586,7 +586,7 @@ test_pve_ssh_goes_through_access_only_when_set() {
   PVE_SSH_ACCESS="$WORK/token.env"
   pve_ssh_options
   [[ " ${PVE_SSH_OPTIONS[*]} " == *" ProxyCommand=$LAB_STATE/host/bin/cloudflared access ssh --hostname %h "* ]] || return 1
-  [[ " ${PVE_SSH_OPTIONS[*]} " == *" ControlPath=$LAB_STATE/access/master "* && " ${PVE_SSH_OPTIONS[*]} " != *ConnectTimeout=10* ]]
+  [[ " ${PVE_SSH_OPTIONS[*]} " == *" ControlPath=none "* && " ${PVE_SSH_OPTIONS[*]} " != *ConnectTimeout=10* ]]
 }
 test_pve_access_needs_the_api_forwarded_to_localhost() {
   mkdir -p "$LAB_STATE/host/bin"
@@ -681,6 +681,42 @@ test_guide_says_to_connect_again_when_the_login_expires() {
   chmod 755 "$bin/kubectl"
   text="$(HOME="$WORK/home" PATH="$bin:$PATH" node -e 'require(process.argv[1]).runChecks({}, ["nodes"]).then((r) => console.log(r.nodes.text))' "$LAB_ROOT/workspace/lab-guide/status.js")" || return 1
   [[ "$text" == "Your cluster login has expired. Run connect again" ]]
+}
+
+fake_flaky_ssh() {
+  local message="$1" failures="$2"
+  printf '%s\n' "$failures" >"$FAKE/ssh-failures"
+  : >"$FAKE/ssh-calls"
+  cat >"$WORK/flaky-bin/ssh" <<EOF
+#!/usr/bin/env bash
+echo call >>"$FAKE/ssh-calls"
+left="\$(cat "$FAKE/ssh-failures")"
+if ((left > 0)); then
+  echo \$((left - 1)) >"$FAKE/ssh-failures"
+  echo "$message" >&2
+  exit 255
+fi
+cat
+echo "ran \${*: -1}"
+EOF
+  chmod 755 "$WORK/flaky-bin/ssh"
+}
+test_pve_ssh_retries_when_the_shared_connection_died_before_the_command() {
+  local out
+  mkdir -p "$WORK/flaky-bin"
+  PVE_SSH_KEY=key PVE_SSH_KNOWN_HOSTS=known PVE_SSH=root@host
+  fake_flaky_ssh 'mux_client_request_session: read from master failed: Broken pipe' 2
+  out="$(printf 'script\n' | PATH="$WORK/flaky-bin:$PATH" pve_ssh 'bash -s' 2>"$WORK/err")" || return 1
+  [[ "$out" == $'script\nran bash -s' && "$(grep -c . "$FAKE/ssh-calls")" == 3 ]] || return 1
+  [[ ! -s "$WORK/err" ]]
+}
+test_pve_ssh_does_not_retry_once_the_command_started() {
+  mkdir -p "$WORK/flaky-bin"
+  PVE_SSH_KEY=key PVE_SSH_KNOWN_HOSTS=known PVE_SSH=root@host
+  fake_flaky_ssh 'client_loop: send disconnect: Broken pipe' 1
+  ! PATH="$WORK/flaky-bin:$PATH" pve_ssh 'pct create 9010' </dev/null >/dev/null 2>"$WORK/err" || return 1
+  [[ "$(grep -c . "$FAKE/ssh-calls")" == 1 ]] && grep -qF 'client_loop: send disconnect' "$WORK/err" || return 1
+  grep -qF 'error: ssh to root@host ended with exit 255 while running: pct create 9010' "$WORK/err"
 }
 
 passed=0

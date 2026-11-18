@@ -1,6 +1,8 @@
 readonly PVE_API_USER=talos-lab@pve
 readonly PVE_API_TOKEN_NAME=kit
 readonly PVE_API_ROLES=PVEVMAdmin,PVEDatastoreAdmin,PVESDNUser,PVEPoolAdmin
+readonly PVE_SSH_ATTEMPTS=4
+readonly PVE_SSH_BEFORE_SESSION='mux_client_request_session|Control socket connect|kex_exchange_identification|websocket: bad handshake|Connection closed by UNKNOWN|during banner exchange|Connection timed out'
 
 pve_load_target() {
   local target="${LAB_PVE_TARGET:-$LAB_STATE/pve-target.env}" var
@@ -52,7 +54,9 @@ pve_access_open() {
     fail "could not reach $PVE_SSH through Cloudflare Access with a forward from 127.0.0.1:$port to its API"
     return 1
   }
-  lab_on_exit pve_access_close
+  if ((BASHPID == $$)); then
+    lab_on_exit pve_access_close
+  fi
 }
 
 pve_access_close() {
@@ -72,7 +76,7 @@ pve_ssh_options() {
     PVE_SSH_OPTIONS+=(
       -o ConnectTimeout=30
       -o "ProxyCommand=$(printf '%q' "$LAB_STATE/host/bin/cloudflared") access ssh --hostname %h"
-      -o ControlPath="$(pve_access_master)"
+      -o ControlPath=none
     )
   else
     PVE_SSH_OPTIONS+=(-o ConnectTimeout=10)
@@ -80,8 +84,23 @@ pve_ssh_options() {
 }
 
 pve_ssh() {
+  local err attempt status
   pve_ssh_options
-  ssh "${PVE_SSH_OPTIONS[@]}" "$PVE_SSH" "$@"
+  err="$(mktemp)"
+  for ((attempt = 1; ; attempt++)); do
+    status=0
+    ssh "${PVE_SSH_OPTIONS[@]}" "$PVE_SSH" "$@" 2>"$err" || status=$?
+    if ((status == 255 && attempt < PVE_SSH_ATTEMPTS)) && grep -qE "$PVE_SSH_BEFORE_SESSION" "$err"; then
+      sleep "$attempt"
+      continue
+    fi
+    cat "$err" >&2
+    rm -f "$err"
+    if ((status == 255)); then
+      printf 'error: ssh to %s ended with exit 255 while running: %.160s\n' "$PVE_SSH" "$*" >&2
+    fi
+    return "$status"
+  done
 }
 
 pve_remote() {
@@ -102,18 +121,31 @@ pve_ssh_forward_open() {
   ssh "${PVE_SSH_OPTIONS[@]}" -M -S "$socket" -f -N -o ExitOnForwardFailure=yes -L "$spec" "$PVE_SSH" 2>/dev/null 9>&-
 }
 
+pve_ssh_forward_alive() {
+  pve_ssh_options
+  ssh "${PVE_SSH_OPTIONS[@]}" -S "$1" -O check "$PVE_SSH" >/dev/null 2>&1
+}
+
 pve_ssh_forward_close() {
   pve_ssh_options
   ssh "${PVE_SSH_OPTIONS[@]}" -S "$1" -O exit "$PVE_SSH" >/dev/null 2>&1 || true
 }
 
 pve_api() {
-  local method="$1" path="$2" body status=0
+  local method="$1" path="$2" body status attempt
   shift 2
-  body="$(curl --silent --show-error --fail-with-body --max-time 120 \
-    --insecure --pinnedpubkey "sha256//$PVE_TLS_PIN" \
-    --config <(printf 'header = "Authorization: PVEAPIToken=%s=%s"\n' "$PVE_TOKEN_ID" "$PVE_TOKEN_SECRET") \
-    -X "$method" "$PVE_URL/api2/json$path" "$@" 2>&1)" || status=$?
+  for ((attempt = 1; ; attempt++)); do
+    status=0
+    body="$(curl --silent --show-error --fail-with-body --max-time 120 \
+      --insecure --pinnedpubkey "sha256//$PVE_TLS_PIN" \
+      --config <(printf 'header = "Authorization: PVEAPIToken=%s=%s"\n' "$PVE_TOKEN_ID" "$PVE_TOKEN_SECRET") \
+      -X "$method" "$PVE_URL/api2/json$path" "$@" 2>&1)" || status=$?
+    if ((status != 7 || attempt >= PVE_SSH_ATTEMPTS)) || [[ -z "${PVE_SSH_ACCESS:-}" ]]; then
+      break
+    fi
+    log "the Proxmox API forward through Cloudflare Access is gone, reopening it"
+    pve_access_open || break
+  done
   if ((status != 0)); then
     fail "Proxmox API $method $path failed with curl exit $status: $body"
     return 1

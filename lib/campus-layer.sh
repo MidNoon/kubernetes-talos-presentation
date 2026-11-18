@@ -76,15 +76,10 @@ campus_show() {
   address="$(sed -n 's/^address //p' <<<"$state")"
   if grep -qx rules <<<"$state"; then
     open="$(sed -n 's/^open //p' <<<"$state" | paste -sd' ')"
-    log "campus side of $PVE_NODE ($uplink, $address): closed to new connections except ${open:-nothing}. Replies, DHCP and ping pass"
+    log "campus side of $PVE_NODE ($uplink, $address): closed to new connections, open: ${open:-none}. Replies, DHCP and ping pass"
   else
     log "campus side of $PVE_NODE ($uplink, $address): no campus rules, every service listening there is reachable"
   fi
-}
-
-campus_fresh_ssh() {
-  pve_ssh_options
-  ssh -o ControlPath=none "${PVE_SSH_OPTIONS[@]}" "$PVE_SSH" true
 }
 
 campus_apply() {
@@ -101,7 +96,7 @@ systemd-run --quiet --unit $CAMPUS_UNIT-revert --on-active=$CAMPUS_REVERT_SECOND
 systemctl daemon-reload
 systemctl enable --quiet $CAMPUS_UNIT
 systemctl restart $CAMPUS_UNIT" || die "could not load the campus rules on $PVE_SSH"
-  campus_fresh_ssh ||
+  pve_ssh true ||
     die "a new connection through Cloudflare Access failed after the campus rules changed. The host removes them within ${CAMPUS_REVERT_SECONDS}s"
   pve_ssh "systemctl stop $CAMPUS_UNIT-revert.timer" || die "could not cancel the campus rules' automatic removal on $PVE_SSH"
   campus_show

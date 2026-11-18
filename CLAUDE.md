@@ -90,7 +90,7 @@ The repository is intended to become public. Account IDs, the domain and the EUL
 - `PVE_URL`, `PVE_NODE`, `PVE_TOKEN_ID`, `PVE_TOKEN_SECRET` and `PVE_TLS_PIN`.
 - `PVE_DISK_STORAGE`, which holds VM disks.
 - `PVE_SSH` (`root@host`), `PVE_SSH_KEY` and `PVE_SSH_KNOWN_HOSTS`.
-- `PVE_SSH_ACCESS`, optional, the path of `.lab/access/service-token.env`. It sends SSH through Cloudflare Access with `PVE_SSH=root@ssh.<zone>`, the key and known_hosts in `.lab/access/ssh/`, and `PVE_URL=https://127.0.0.1:<port>`. Each run then opens one SSH connection that other SSH calls share and that forwards that port to the host's API on 8006.
+- `PVE_SSH_ACCESS`, optional, the path of `.lab/access/service-token.env`. It sends SSH through Cloudflare Access with `PVE_SSH=root@ssh.<zone>`, the key and known_hosts in `.lab/access/ssh/`, and `PVE_URL=https://127.0.0.1:<port>`. Each run then opens one SSH connection that forwards that port to the host's API on 8006 and reopens it when it drops. Every other SSH call opens its own connection.
 
 The token belongs to `talos-lab@pve`, which has the roles `PVEVMAdmin`, `PVEDatastoreAdmin`, `PVESDNUser` and `PVEPoolAdmin` on `/`. `PVE_TLS_PIN` is the base64 SHA-256 of the server's public key. Root SSH is key-only and checks the host key strictly.
 
@@ -230,7 +230,7 @@ It installs `/etc/dhcp/dhclient-exit-hooks.d/talos-lab`. When DHCP gives the hos
 - `cf` writes a `.cloudflare/` cache containing account details into the working directory, and it is git-ignored.
 - `cloudflared access ssh` reads the service token from `TUNNEL_SERVICE_TOKEN_ID` and `TUNNEL_SERVICE_TOKEN_SECRET`, so the secret stays off the command line. Access asks for a browser login unless the policy's decision is Service Auth (`non_identity`). With only that policy, a request without the token, or with a wrong one, gets 403 before it reaches the tunnel. The service token's secret is shown only when it is created, so `access up` replaces a token whose secret is not in `.lab/access/`.
 - `ssh -S` replaces an earlier `-o ControlPath`, so a seat's Omni forward keeps its own control socket while other SSH calls share the access connection.
-- A new SSH connection through Cloudflare Access takes a few seconds, against a fraction of a second over a shared connection.
+- A new SSH connection through Cloudflare Access takes about a second. A long-lived one can drop, and a command running over a shared connection that drops ends with exit 255 and no message, with no way to tell whether it finished. So only the API forward is long-lived. `pve_ssh` retries a call that failed before its session started, and names the command when it ends with exit 255 otherwise.
 - In `jq`, `false // x` returns `x`. Compare booleans explicitly when `false` is a meaningful value.
 - Proxmox VE 9 goes on Debian 13 as the Proxmox wiki describes: hostname resolving to the real address in `/etc/hosts`, the no-subscription repository with the trixie keyring, `proxmox-default-kernel` and a reboot, then `proxmox-ve postfix open-iscsi chrony`, then removing the Debian kernels and `os-prober`. The install adds `pve-enterprise.sources`, which fails without a subscription until it is disabled.
 - On Proxmox, ifupdown2 runs `dhclient` for an `inet dhcp` interface, and Debian's AppArmor profile for `dhclient` blocks its unix sockets under the Proxmox kernel, so it exits at once. Disabling that profile through `/etc/apparmor.d/disable/sbin.dhclient` fixes it. Until then, an address left by NetworkManager hides the problem until its lease runs out.

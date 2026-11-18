@@ -96,6 +96,11 @@ seat_omnictl() {
     return 1
   }
   seat_omni_forward_open || return 1
+  if ! pve_ssh_forward_alive "$SEAT_STATE/omni-forward.sock"; then
+    log "the forward to seat $SEAT's Omni is gone, reopening it"
+    seat_omni_forward_close
+    seat_omni_forward_open || return 1
+  fi
   OMNI_ENDPOINT="$SEAT_OMNI_FORWARD" OMNI_SERVICE_ACCOUNT_KEY="$(<"$key")" \
     timeout "${LAB_OMNI_TIMEOUT:-120}" "$(host_omnictl_local)" "$@"
 }
