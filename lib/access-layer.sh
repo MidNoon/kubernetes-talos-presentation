@@ -268,9 +268,9 @@ access_down() {
   before="$(cf_snapshot_access_others)" || exit 1
   if [[ -s "$(access_known_hosts)" && -s "$ACCESS_STATE/service-token.env" ]] && access_use_target && pve_ssh true 2>/dev/null; then
     pubkey="$(awk '{print $2}' "$(access_key).pub")"
-    pve_ssh "systemd-run --quiet --collect --on-active=5 /bin/sh -c $(printf '%q' "systemctl disable --now $ACCESS_REMOTE_UNIT; rm -f /etc/systemd/system/$ACCESS_REMOTE_UNIT.service; systemctl daemon-reload; rm -rf $ACCESS_REMOTE_BIN $ACCESS_REMOTE_ETC; sed -i '\\|$pubkey|d' /root/.ssh/authorized_keys")" ||
+    pve_ssh "systemd-run --quiet --collect --on-active=5 /bin/sh -c $(printf '%q' "systemctl disable --now $ACCESS_REMOTE_UNIT; systemctl disable --now $CAMPUS_UNIT; nft delete table inet $CAMPUS_TABLE; rm -f /etc/systemd/system/$ACCESS_REMOTE_UNIT.service /etc/systemd/system/$CAMPUS_UNIT.service $CAMPUS_RULES $CAMPUS_OPEN; systemctl daemon-reload; rm -rf $ACCESS_REMOTE_BIN $ACCESS_REMOTE_ETC; sed -i '\\|$pubkey|d' /root/.ssh/authorized_keys")" ||
       die "could not schedule removal of the access connector on $PVE_SSH"
-    log "the site host removes its access connector and our key in 5 seconds"
+    log "the site host removes its access connector, its campus rules and our key in 5 seconds"
   else
     log "the site host is not reachable through $(cf_access_hostname), removing the Cloudflare side only"
   fi

@@ -93,6 +93,7 @@ If you prefer your VPN, VPN accounts for two people with TCP 22 and 8006 to the 
 ## Security and data
 
 - No inbound ports are open to the internet. The host makes only outbound connections, including the tunnel we manage it through.
+- On your network, the VM refuses new inbound connections. We open its SSH or Proxmox web interface to your network only when you ask, and close them again with one command.
 - Each student gets their own private network, cluster manager, Proxmox resource pool and storage. Omni and Proxmox show each student only their own.
 - Logins are issued by the lab for the session, one per seat. No university accounts or student personal data are used.
 - Students' VMs reach the internet through the host's address. The host drops their traffic to other students' networks, to the host itself, and to every private, carrier-grade NAT and link-local range (`10.0.0.0/8`, `100.64.0.0/10`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`). Only DNS to the resolvers you give us is allowed. University ranges outside those, such as internal networks on public addresses, can be added to the blocked list, or the VM can sit on an isolated network segment.

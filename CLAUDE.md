@@ -18,6 +18,8 @@ Students build a Talos install image in their Omni, have Proxmox download it, ma
 ./lab access target                          # API token and disk storage on the site's Proxmox, written to .lab/pve-target.env
 ./lab access verify [SHA256:...]             # record the site host's key on first contact, then check it
 ./lab access ssh [command...]                # a shell or a command on the site host, without the run lock
+./lab campus [ssh|proxmox open|close]        # what the site host's campus network can reach; no argument shows it
+./lab campus close|reset                     # close every service to campus, or remove the campus rules
 ./lab proxmox up|verify|down                 # nested Proxmox VM on the local libvirt host
 ./lab host up|verify|down                    # shared services on the Proxmox host
 ./lab seats create <count>|delete            # per-seat network, Omni, ISO storage, workspace, logins, site tunnel
@@ -54,6 +56,7 @@ Running `seats create` again leaves running seats untouched, because a seat's Om
 - `lib/cloudflare.sh` is the only path to `cf`, through `cf_query` and its allowlist, plus tunnel and DNS primitives.
 - `lib/proxmox-layer.sh` builds the nested Proxmox VM with libvirt.
 - `lib/access-layer.sh` builds and removes the SSH path to a site host through Cloudflare Access, and its bootstrap script.
+- `lib/campus-layer.sh` controls what the campus network beside a site host can reach on it.
 - `lib/host-layer.sh` builds the shared services on the Proxmox host.
 - `lib/seats-layer.sh` builds and removes seats. `seat_omnictl` is the only path to a seat's Omni.
 - `lib/rehearsal-layer.sh`, `lib/site-layer.sh`, `lib/failover-layer.sh` and `lib/upgrade-layer.sh` play a student's run on a seat. The site layer holds the public probe, timeline and summary that failover and upgrade share.
@@ -127,6 +130,8 @@ The access layer may write only the tunnel `talos-lab-access`, the CNAME `ssh`, 
 
 `./lab access target` creates `talos-lab@pve` and its token over SSH, adds the directory storage `lab-disks` at `/var/lib/lab-disks` for VM disks and container root filesystems, so students never see the host's `local` storage, and reads the pin from the live web interface on 8006.
 
+**Campus.** `./lab campus` works only on a target reached through Access, so closing the campus side never cuts off the lab. It loads the nftables table `inet talos_campus` from `/etc/talos-campus.nft` through `talos-campus.service`, before the network comes up at boot. On the uplink, the table drops every new inbound connection except DHCP replies, ping and the services opened: `ssh` (22) and `proxmox` (8006 and the SPICE proxy on 3128). Everything else listening there, such as rpcbind, avahi and the seats' DHCP server, stays closed while the rules exist. The open services are listed in `/etc/talos-campus.open`. Without rules, everything is reachable, so the first change starts from both services open. Each change arms a 2 minute removal of the rules on the host, opens a new SSH connection through Access, and cancels the removal only when it succeeds. `./lab campus reset` removes the rules, and `access down` removes them with the connector.
+
 **Host.** The host layer prepares the Proxmox host:
 - It disables the enterprise apt sources, installs dnsmasq, loads the WireGuard module, and turns on IPv4 forwarding through `/etc/sysctl.d/talos-lab.conf`.
 - It creates the SDN simple zone `talab` with DHCP, and downloads the Debian 13 container template.
@@ -139,7 +144,9 @@ It runs three systemd services:
 - `talos-lab-cloudflared` runs the `talos-lab-host` tunnel. That tunnel maps `auth` to Dex and `pve` to Proxmox on 8006. For each seat, it maps `omniNN` and `kubeNN` to the seat's Omni API and Kubernetes proxy, and `shellNN` to its workspace.
 - `talos-lab-isolation` loads the nftables table `ip talos_lab` from `/etc/talos-lab/isolation.nft` before guests start. Its forward chain passes traffic from `10.88.0.0/16` to the seat's own subnet, to the resolvers in `host-dns` on port 53, and to the internet. It drops it to every other seat and to `10.0.0.0/8`, `100.64.0.0/10`, `169.254.0.0/16`, `172.16.0.0/12` and `192.168.0.0/16`. Its input chain lets seats reach the host only for DHCP, ping, and replies to connections the host opened. Traffic from anywhere else is untouched.
 
-`host verify` signs in through the public hostnames with the passwords in `users.tsv`, the way a browser does. The instructor signs in to Proxmox. Each seat's student signs in to the workspace, Omni and Proxmox. In Proxmox they must see only their own pool, their disk storage and their own ISO storage, and must be allowed to download into the ISO storage. A rejected password fails the run with the login that rejected it. From each seat's workspace, it probes its own Omni, SSH on the gateway and on the host's main address, the Image Factory, and another seat's Omni when there is one, and resolves a name. Only the seat's own Omni, the Image Factory and the name may get through.
+It installs `/etc/dhcp/dhclient-exit-hooks.d/talos-lab`. When DHCP gives the host an address that differs from its name's entry in `/etc/hosts`, the hook rewrites the entry, then restarts pve-cluster and reloads SDN once pve-cluster runs, so each seat's SNAT uses the new address.
+
+`host verify` checks that the host's name resolves to its current address. It signs in through the public hostnames with the passwords in `users.tsv`, the way a browser does. The instructor signs in to Proxmox. Each seat's student signs in to the workspace, Omni and Proxmox. In Proxmox they must see only their own pool, their disk storage and their own ISO storage, and must be allowed to download into the ISO storage. A rejected password fails the run with the login that rejected it. From each seat's workspace, it probes its own Omni, SSH on the gateway and on the host's main address, the Image Factory, and another seat's Omni when there is one, and resolves a name. Only the seat's own Omni, the Image Factory and the name may get through.
 
 **Seats.** Seat n gets:
 - the vnet `seatNN` on `10.88.n.0/24`, with gateway `.1` on the host, SNAT out, DHCP from `.100` to `.199`, and the host's resolver;
@@ -228,6 +235,8 @@ It runs three systemd services:
 - Proxmox VE 9 goes on Debian 13 as the Proxmox wiki describes: hostname resolving to the real address in `/etc/hosts`, the no-subscription repository with the trixie keyring, `proxmox-default-kernel` and a reboot, then `proxmox-ve postfix open-iscsi chrony`, then removing the Debian kernels and `os-prober`. The install adds `pve-enterprise.sources`, which fails without a subscription until it is disabled.
 - On Proxmox, ifupdown2 runs `dhclient` for an `inet dhcp` interface, and Debian's AppArmor profile for `dhclient` blocks its unix sockets under the Proxmox kernel, so it exits at once. Disabling that profile through `/etc/apparmor.d/disable/sbin.dhclient` fixes it. Until then, an address left by NetworkManager hides the problem until its lease runs out.
 - Proxmox VE installed from its ISO forwards IPv4, and Proxmox VE installed on Debian does not. An SDN vnet's `ip-forward on` covers only the vnet's own interface, so without `net.ipv4.ip_forward` a seat's packets leave through SNAT and the replies coming in on the uplink are dropped.
+- dhclient-script sources each file in `/etc/dhcp/dhclient-exit-hooks.d` with `/bin/sh` after it configures the interface, so a hook is POSIX shell that returns instead of exiting.
+- Proxmox SDN writes each SNAT rule with the uplink's address at the time of the last SDN apply, so the rule needs a reload when DHCP changes the address.
 - `pvenetcommit` moves a pending `/etc/network/interfaces.new` over `/etc/network/interfaces` at boot, so a hand edit of `interfaces` is lost when a pending file exists.
 - Debian's NetworkManager lets go of interfaces listed in `/etc/network/interfaces` because of `[ifupdown] managed=false`. On a Debian site host with a desktop, NetworkManager is masked rather than removed, because removing it removes the `gnome` metapackage.
 - A `$(...)` subshell that calls `lab_on_exit` sets its own EXIT trap and holds a copy of the parent's hooks, so each hook records the process that registered it and runs only when that process exits. Otherwise the first `seat_omnictl` in a subshell would close the run's shared access connection.

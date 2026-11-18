@@ -81,6 +81,7 @@ load_libs() {
   source "$LAB_ROOT/lib/failover-layer.sh"
   source "$LAB_ROOT/lib/upgrade-layer.sh"
   source "$LAB_ROOT/lib/access-layer.sh"
+  source "$LAB_ROOT/lib/campus-layer.sh"
   LAB_STATE="$WORK/state"
   HOST_STATE="$LAB_STATE/host"
   ACCESS_STATE="$LAB_STATE/access"
@@ -624,6 +625,52 @@ test_access_target_sends_every_call_through_access() {
     [[ "$PVE_URL" == https://127.0.0.1:18006 && "$PVE_SSH" == root@ssh.zone.example && "$PVE_TOKEN_ID" == 'talos-lab@pve!kit' ]] || exit 1
     [[ "$PVE_SSH_ACCESS" == "$ACCESS_STATE/service-token.env" && "$PVE_SSH_KEY" == "$ACCESS_STATE/ssh/id_ed25519" && "$PVE_DISK_STORAGE" == lab-disks ]]
   )
+}
+
+test_address_hook_follows_a_new_dhcp_address() {
+  local bin="$WORK/hook-bin" hook="$WORK/hook.sh" hosts="$WORK/hosts"
+  mkdir -p "$bin"
+  printf '#!/bin/sh\necho site-host\n' >"$bin/hostname"
+  printf '#!/bin/sh\n:\n' >"$bin/logger"
+  printf '#!/bin/sh\necho "$*" >>"%s/systemd-run"\n' "$WORK" >"$bin/systemd-run"
+  chmod 755 "$bin"/*
+  host_render_address_hook | sed "s|^  hosts=/etc/hosts\$|  hosts=$hosts|" >"$hook"
+  run_hook() { (export PATH="$bin:$PATH" reason="$1" new_ip_address="$2" && sh -c ". '$hook'"); }
+  printf '127.0.0.1\tlocalhost\n10.1.2.3\tsite-host.internal site-host\n::1 localhost\n' >"$hosts"
+  run_hook RENEW 10.1.2.3 || return 1
+  [[ ! -e "$WORK/systemd-run" ]] || return 1
+  run_hook EXPIRE 10.9.9.9 || return 1
+  [[ ! -e "$WORK/systemd-run" ]] || return 1
+  run_hook BOUND 10.1.20.30 || return 1
+  [[ "$(cat "$hosts")" == "$(printf '127.0.0.1\tlocalhost\n10.1.20.30\tsite-host.internal site-host\n::1 localhost')" ]] || return 1
+  [[ "$(grep -c 'pvesh set /cluster/sdn' "$WORK/systemd-run")" == 1 ]] || return 1
+  printf '127.0.0.1\tlocalhost\n' >"$hosts"
+  run_hook REBOOT 10.4.5.6 || return 1
+  grep -qxF "$(printf '10.4.5.6\tsite-host.internal site-host')" "$hosts"
+}
+
+test_campus_rules_drop_new_connections_except_the_opened_services() {
+  local rules
+  rules="$(campus_render_rules ens18)"
+  grep -qxF '    iifname != "ens18" accept' <<<"$rules" || return 1
+  ! grep -qF 'tcp dport' <<<"$rules" || return 1
+  [[ "$(tail -3 <<<"$rules" | head -1)" == '    drop' ]] || return 1
+  rules="$(campus_render_rules ens18 ssh proxmox)"
+  grep -qxF '    tcp dport { 22, 8006, 3128 } accept' <<<"$rules" || return 1
+  rules="$(campus_render_rules ens18 proxmox)"
+  grep -qxF '    tcp dport { 8006, 3128 } accept' <<<"$rules" || return 1
+  grep -qxF '    udp dport 68 accept' <<<"$rules" && grep -qxF '    ct state established,related accept' <<<"$rules"
+}
+test_campus_starts_from_everything_open_without_rules() {
+  [[ "$(campus_open_services $'none\nuplink ens18')" == $'ssh\nproxmox' ]] || return 1
+  [[ "$(campus_open_services $'rules\nopen proxmox\nuplink ens18')" == proxmox ]] || return 1
+  [[ -z "$(campus_open_services $'rules\nuplink ens18')" ]]
+}
+test_campus_refuses_a_host_reached_without_access() {
+  printf 'PVE_URL=https://10.0.0.5:8006\nPVE_NODE=pve\nPVE_TOKEN_ID=t\nPVE_TOKEN_SECRET=s\nPVE_TLS_PIN=p\nPVE_DISK_STORAGE=local\nPVE_SSH=root@10.0.0.5\nPVE_SSH_KEY=k\nPVE_SSH_KNOWN_HOSTS=h\n' >"$WORK/direct.env"
+  printf 'LAB_CF_ACCOUNT_ID=acct\nLAB_TUNNEL_ZONE=zone.example\nLAB_OMNI_EULA_NAME=n\nLAB_OMNI_EULA_EMAIL=e\n' >"$WORK/lab.env"
+  ! (LAB_CONFIG="$WORK/lab.env" LAB_PVE_TARGET="$WORK/direct.env" campus_load) 2>"$WORK/err" || return 1
+  grep -qF 'need a target reached through Cloudflare Access' "$WORK/err"
 }
 
 passed=0

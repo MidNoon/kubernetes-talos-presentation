@@ -15,12 +15,15 @@ source "$LAB_ROOT/lib/site-layer.sh"
 source "$LAB_ROOT/lib/failover-layer.sh"
 source "$LAB_ROOT/lib/upgrade-layer.sh"
 source "$LAB_ROOT/lib/access-layer.sh"
+source "$LAB_ROOT/lib/campus-layer.sh"
 
 usage() {
   cat >&2 <<'EOF'
 usage: lab access up|serve|target|down
        lab access verify [host-key-fingerprint]
        lab access ssh [command...]
+       lab campus [ssh|proxmox open|close]
+       lab campus close|reset
        lab proxmox up|verify|down
        lab host up|verify|down
        lab seats create <count>|delete
@@ -31,7 +34,7 @@ EOF
 }
 
 main() {
-  (($# >= 2)) || usage
+  (($# >= 2)) || [[ "${1:-}" == campus ]] || usage
   case "$1" in
     access)
       case "$2" in
@@ -63,6 +66,16 @@ main() {
           lab_lock "$*"
           access_down
           ;;
+        *) usage ;;
+      esac
+      ;;
+    campus)
+      lab_lock "$*"
+      case "$#:${2:-}" in
+        1:) campus_status ;;
+        2:close) campus_close ;;
+        2:reset) campus_reset ;;
+        3:*) campus_set "$2" "$3" ;;
         *) usage ;;
       esac
       ;;

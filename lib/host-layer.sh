@@ -23,6 +23,7 @@ readonly HOST_SERVICES=(talos-lab-dex talos-lab-cloudflared talos-lab-isolation)
 readonly HOST_SEAT_RANGE=10.88.0.0/16
 readonly HOST_BLOCKED_RANGES='10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16'
 readonly HOST_READY_TIMEOUT=300
+readonly HOST_ADDRESS_HOOK=/etc/dhcp/dhclient-exit-hooks.d/talos-lab
 readonly HOST_CT_TEMPLATE_PATTERN='^debian-13-standard_[0-9.-]+_amd64\.tar\.zst$'
 
 HOST_STATE="$LAB_STATE/host"
@@ -536,6 +537,27 @@ internet open"
   log "seat $number reaches its own Omni, names and the internet, and not the host$([[ -n "$other" ]] && printf ' or seat %s' "$other")"
 }
 
+host_render_address_hook() {
+  cat <<'EOF'
+talos_lab_address() {
+  hosts=/etc/hosts
+  case "$reason" in BOUND | RENEW | REBIND | REBOOT) ;; *) return 0 ;; esac
+  [ -n "$new_ip_address" ] || return 0
+  name="$(hostname)"
+  current="$(awk -v name="$name" '$1 !~ /^(#|127\.|::1)/ { for (i = 2; i <= NF; i++) if ($i == name) { print $1; exit } }' "$hosts")"
+  [ "$current" = "$new_ip_address" ] && return 0
+  if [ -n "$current" ]; then
+    sed -i "s/^$(printf '%s' "$current" | sed 's/\./\\./g')\([[:space:]]\)/$new_ip_address\1/" "$hosts"
+  else
+    printf '%s\t%s.internal %s\n' "$new_ip_address" "$name" "$name" >>"$hosts"
+  fi
+  logger -t talos-lab "address of $name changed from ${current:-none} to $new_ip_address, restarting pve-cluster and reloading SDN"
+  systemd-run --no-block --quiet --collect --property=After=pve-cluster.service /bin/sh -c 'systemctl try-restart pve-cluster && pvesh set /cluster/sdn'
+}
+talos_lab_address
+EOF
+}
+
 host_install_services() {
   printf 'TUNNEL_TOKEN=%s\n' "$(<"$HOST_STATE/connector-token")" | host_install_file 600 "$HOST_REMOTE_ETC/cloudflared.env"
   host_render_dex | host_install_file 600 "$HOST_REMOTE_ETC/dex.json"
@@ -543,6 +565,7 @@ host_install_services() {
   host_render_cloudflared_unit | host_install_file 644 /etc/systemd/system/talos-lab-cloudflared.service
   host_render_isolation | host_install_file 600 "$HOST_REMOTE_ETC/isolation.nft"
   host_render_isolation_unit | host_install_file 644 /etc/systemd/system/talos-lab-isolation.service
+  host_render_address_hook | host_install_file 644 "$HOST_ADDRESS_HOOK"
   pve_ssh "systemctl daemon-reload && systemctl enable --quiet ${HOST_SERVICES[*]} && systemctl restart ${HOST_SERVICES[*]}"
 }
 
@@ -665,6 +688,15 @@ host_up() {
   [[ "$before" == "$after" ]] || die "other Cloudflare resources changed during host up. Before: $before. After: $after"
 }
 
+host_verify_address() {
+  local address resolved
+  address="$(pve_ssh "ip -4 -o route get 1.1.1.1" | grep -oE 'src [0-9.]+' | cut -d' ' -f2)" ||
+    host_capture_failure "the host's default route names no source address"
+  resolved="$(pve_ssh "hostname --ip-address")" || host_capture_failure "the host's name does not resolve"
+  [[ " $resolved " == *" $address "* ]] ||
+    host_capture_failure "the host's name resolves to $resolved, not its address $address, so pve-cluster cannot start. Fix /etc/hosts"
+}
+
 host_verify() {
   local service number seats
   for service in "${HOST_SERVICES[@]}"; do
@@ -672,6 +704,7 @@ host_verify() {
   done
   host_wait_public dex "https://$(host_name auth)/.well-known/openid-configuration"
   host_wait_public proxmox "https://$(host_name pve)/"
+  host_verify_address
   host_pve_login instructor || host_capture_failure "instructor cannot sign in to Proxmox"
   log "instructor signs in to Proxmox through Dex"
   seats="$(host_seat_numbers)"
@@ -693,7 +726,7 @@ host_down() {
   [[ -z "$vnets" ]] || die "zone $HOST_SDN_ZONE still has vnets: $(paste -sd' ' <<<"$vnets"), run ./lab seats delete first"
   before="$(cf_snapshot_others)" || exit 1
   pve_remote SERVICES="${HOST_SERVICES[*]}" BIN="$HOST_REMOTE_BIN" ETC="$HOST_REMOTE_ETC" ZONE="$HOST_SDN_ZONE" \
-    REALM="$HOST_PVE_REALM" ROLES="$HOST_MEDIA_ROLE $HOST_DOWNLOAD_ROLE" ISO_ROOT="$HOST_ISO_ROOT" <<'EOF'
+    REALM="$HOST_PVE_REALM" ROLES="$HOST_MEDIA_ROLE $HOST_DOWNLOAD_ROLE" ISO_ROOT="$HOST_ISO_ROOT" ADDRESS_HOOK="$HOST_ADDRESS_HOOK" <<'EOF'
 set -euo pipefail
 if pveum user list --output-format json | grep -q "\"userid\":\"instructor@$REALM\""; then
   pveum user delete "instructor@$REALM"
@@ -712,7 +745,7 @@ for service in $SERVICES; do
   rm -f "/etc/systemd/system/$service.service"
 done
 systemctl daemon-reload
-rm -rf "$BIN" "$ETC" /etc/modules-load.d/talos-lab.conf /etc/sysctl.d/talos-lab.conf
+rm -rf "$BIN" "$ETC" /etc/modules-load.d/talos-lab.conf /etc/sysctl.d/talos-lab.conf "$ADDRESS_HOOK"
 if pvesh get "/cluster/sdn/zones/$ZONE" >/dev/null 2>&1; then
   pvesh delete "/cluster/sdn/zones/$ZONE" >/dev/null
   pvesh set /cluster/sdn >/dev/null
