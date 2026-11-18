@@ -222,11 +222,22 @@ rehearsal_cluster() {
   log "syncing cluster template for $SEAT_CLUSTER"
   LAB_OMNI_TIMEOUT=300 seat_omnictl cluster template sync -f "$template" >/dev/null || rehearsal_capture_failure "cluster template sync failed"
   rehearsal_wait_cluster_ready
+  rehearsal_fetch_kubeconfig
+  rehearsal_wait_nodes_ready || rehearsal_capture_failure "nodes did not become Ready through https://$SEAT_KUBE_HOST"
+  log "cluster $SEAT_CLUSTER ready, kubectl reaches it through https://$SEAT_KUBE_HOST"
+}
+
+rehearsal_fetch_kubeconfig() {
   rm -f "$(lab_kubeconfig)"
   seat_omnictl kubeconfig "$(lab_kubeconfig)" --cluster "$SEAT_CLUSTER" --service-account --user talos-lab-kit --ttl 24h --force --merge=false >/dev/null || exit 1
   [[ -s "$(lab_kubeconfig)" ]] || die "omnictl did not write a kubeconfig to $(lab_kubeconfig)"
-  rehearsal_wait_nodes_ready || rehearsal_capture_failure "nodes did not become Ready through https://$SEAT_KUBE_HOST"
-  log "cluster $SEAT_CLUSTER ready, kubectl reaches it through https://$SEAT_KUBE_HOST"
+}
+
+rehearsal_use_cluster() {
+  local clusters
+  clusters="$(rehearsal_cluster_names)" || exit 1
+  grep -qxF "$SEAT_CLUSTER" <<<"$clusters" || die "$SEAT_NAME has no cluster $SEAT_CLUSTER, run ./lab seat $SEAT up first"
+  rehearsal_fetch_kubeconfig
 }
 
 rehearsal_student() {

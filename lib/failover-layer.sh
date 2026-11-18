@@ -111,7 +111,7 @@ failover_run() {
   local requested="$1" target="$2" index vmid name id node t0 url coredns_on
   index="$(failover_worker_index "$target")" || exit 1
   rehearsal_load "$requested"
-  [[ -s "$(lab_kubeconfig)" ]] || die "$SEAT_NAME has no cluster, run ./lab seat $SEAT up first"
+  rehearsal_use_cluster
   vmid="${SEAT_VM_IDS[index]}"
   name="${SEAT_VM_NAMES[index]}"
   id="${SEAT_MACHINE_IDS[index]}"
