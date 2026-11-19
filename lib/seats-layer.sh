@@ -89,20 +89,42 @@ seat_omni_forward_open() {
   fail "could not forward a local port from 18080 to 18099 to $SEAT_OMNI_ADDR:8080 through $PVE_SSH"
 }
 
-seat_omnictl() {
-  local key="$SEAT_STATE/omni-service-account.key"
-  [[ -s "$key" ]] || {
-    fail "seat $SEAT has no Omni service account key at $key, run ./lab seats create first"
-    return 1
-  }
+seat_omnictl_forward() {
   seat_omni_forward_open || return 1
   if ! pve_ssh_forward_alive "$SEAT_STATE/omni-forward.sock"; then
     log "the forward to seat $SEAT's Omni is gone, reopening it"
     seat_omni_forward_close
     seat_omni_forward_open || return 1
   fi
-  OMNI_ENDPOINT="$SEAT_OMNI_FORWARD" OMNI_SERVICE_ACCOUNT_KEY="$(<"$key")" \
-    timeout "${LAB_OMNI_TIMEOUT:-120}" "$(host_omnictl_local)" "$@"
+}
+
+seat_omnictl() {
+  local key="$SEAT_STATE/omni-service-account.key" out err status attempt
+  [[ -s "$key" ]] || {
+    fail "seat $SEAT has no Omni service account key at $key, run ./lab seats create first"
+    return 1
+  }
+  out="$(mktemp)"
+  err="$(mktemp)"
+  for ((attempt = 1; attempt <= 2; attempt++)); do
+    status=0
+    if seat_omnictl_forward; then
+      OMNI_ENDPOINT="$SEAT_OMNI_FORWARD" OMNI_SERVICE_ACCOUNT_KEY="$(<"$key")" \
+        timeout "${LAB_OMNI_TIMEOUT:-120}" "$(host_omnictl_local)" "$@" >"$out" 2>"$err" || status=$?
+    else
+      status=1
+      : >"$out"
+      : >"$err"
+      break
+    fi
+    ((status != 0 && attempt < 2)) || break
+    pve_ssh_forward_alive "$SEAT_STATE/omni-forward.sock" && break
+    log "the forward to seat $SEAT's Omni dropped during omnictl ${*:1:2}, running it again"
+  done
+  cat "$out"
+  cat "$err" >&2
+  rm -f "$out" "$err"
+  return "$status"
 }
 
 seat_ensure_secrets() {
@@ -644,6 +666,7 @@ seats_create() {
     numbers="$(host_seats_on "$name" | awk -v count="$count" '$1 + 0 <= count')"
     [[ -n "$numbers" ]] || continue
     host_switch "$name"
+    host_require_shown
     host_sync_tunnel
     for number in $numbers; do
       seat_create "$number"

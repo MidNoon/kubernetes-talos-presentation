@@ -32,7 +32,7 @@ usage: lab hosts
        lab campus <host> close|reset
        lab local up|down <host>
        lab host install <host>
-       lab host up|verify|down [host]
+       lab host up|verify|hide|show|down [host]
        lab seats create <count>|delete
        lab seat <number> up|upgrade|reset|delete
        lab seat <number> failover [worker-a|worker-b]
@@ -115,6 +115,8 @@ main() {
           ;;
         up) host_up "${3:-}" ;;
         verify) host_verify_hosts "${3:-}" ;;
+        hide) host_hide "${3:-}" ;;
+        show) host_show "${3:-}" ;;
         down) host_down "${3:-}" ;;
         *) usage ;;
       esac

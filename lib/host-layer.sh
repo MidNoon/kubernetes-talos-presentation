@@ -21,6 +21,8 @@ readonly HOST_REMOTE_ETC=/etc/talos-lab
 readonly HOST_SEAT_RANGE=10.88.0.0/16
 readonly HOST_BLOCKED_RANGES='10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16'
 readonly HOST_READY_TIMEOUT=300
+readonly HOST_HIDE_TIMEOUT=120
+readonly HOST_HIDDEN_STATUS=530
 readonly HOST_ADDRESS_HOOK=/etc/dhcp/dhclient-exit-hooks.d/talos-lab
 readonly HOST_CT_TEMPLATE_PATTERN='^debian-13-standard_[0-9.-]+_amd64\.tar\.zst$'
 
@@ -722,8 +724,22 @@ host_verify_address() {
     host_capture_failure "the host's name resolves to $resolved, not its address $address, so pve-cluster cannot start. Fix /etc/hosts"
 }
 
+host_tunnel_unit_state() {
+  pve_ssh "systemctl is-enabled talos-lab-cloudflared 2>/dev/null || true"
+}
+
+host_require_shown() {
+  [[ "$(host_tunnel_unit_state)" != disabled ]] ||
+    die "$HOST_NAME is hidden from the internet, run ./lab host show $HOST_NAME first"
+}
+
+host_public_status() {
+  lab_public_curl --silent --max-time 10 --output /dev/null --write-out '%{http_code}' "$1" || true
+}
+
 host_verify() {
   local service number seats
+  host_require_shown
   for service in $(host_services); do
     pve_ssh "systemctl is-active --quiet $service" || host_capture_failure "$service is not active on $HOST_NAME"
   done
@@ -749,6 +765,62 @@ host_verify_hosts() {
   for name in $names; do
     host_load "$name"
     host_verify
+  done
+}
+
+host_hide_one() {
+  local state hostname code deadline number shown=()
+  host_load "$1"
+  state="$(host_tunnel_unit_state)"
+  if [[ "$state" != enabled && "$state" != disabled ]]; then
+    log "$HOST_NAME runs no lab tunnel, so none of its links are public"
+    return 0
+  fi
+  pve_ssh "systemctl disable --now --quiet talos-lab-cloudflared"
+  deadline=$((SECONDS + HOST_HIDE_TIMEOUT))
+  for hostname in $(host_wanted_hostnames); do
+    until code="$(host_public_status "https://$hostname/")" && [[ "$code" == "$HOST_HIDDEN_STATUS" ]]; do
+      ((SECONDS < deadline)) || die "https://$hostname/ still answers with $code ${HOST_HIDE_TIMEOUT}s after the tunnel connector on $HOST_NAME stopped"
+      sleep 3
+    done
+  done
+  for number in $(host_seats_on "$HOST_NAME"); do
+    code="$(host_public_status "https://$(host_name "team$number")/")"
+    [[ "$code" == "$HOST_HIDDEN_STATUS" ]] || shown+=("team$number ($code)")
+  done
+  ((${#shown[@]} == 0)) ||
+    die "the links of $HOST_NAME are hidden, but ${shown[*]} still answer, because a cluster on that seat runs its site connector. ./lab seat <number> reset removes it"
+  log "$HOST_NAME hidden: $(host_wanted_hostnames | paste -sd' ') and its seat sites answer $HOST_HIDDEN_STATUS. ./lab host show $HOST_NAME brings them back"
+}
+
+host_hide() {
+  local name names
+  lab_load_config
+  names="${1:-$(hosts_names | tac)}"
+  for name in $names; do
+    host_hide_one "$name"
+  done
+}
+
+host_show_one() {
+  host_load "$1"
+  case "$(host_tunnel_unit_state)" in
+    enabled | disabled) ;;
+    *) die "$HOST_NAME runs no lab services, run ./lab host up $HOST_NAME" ;;
+  esac
+  if ! host_is_primary && [[ "$(host_public_status "https://$(host_name auth)/.well-known/openid-configuration")" == "$HOST_HIDDEN_STATUS" ]]; then
+    die "the lab sign-in at https://$(host_name auth) answers $HOST_HIDDEN_STATUS, so $(hosts_primary) is hidden or its tunnel connector is down. Run ./lab host show $(hosts_primary) first"
+  fi
+  pve_ssh "systemctl enable --now --quiet talos-lab-cloudflared"
+  host_verify
+}
+
+host_show() {
+  local name names
+  lab_load_config
+  names="${1:-$(hosts_names)}"
+  for name in $names; do
+    host_show_one "$name"
   done
 }
 

@@ -299,6 +299,7 @@ rehearsal_guide_status() {
 
 seat_up() {
   rehearsal_load "$1"
+  host_require_shown
   rehearsal_guide_status false
   rehearsal_machines
   rehearsal_cluster

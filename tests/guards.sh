@@ -873,6 +873,85 @@ test_pve_remote_runs_a_dropped_script_again_and_prints_one_result() {
   grep -qF 'running the script again' "$WORK/err"
 }
 
+test_host_verify_refuses_a_hidden_host_and_names_the_way_back() {
+  ! (
+    pve_ssh() { [[ "$1" == "systemctl is-enabled talos-lab-cloudflared"* ]] && printf 'disabled\n'; }
+    host_verify
+  ) 2>"$WORK/err" || return 1
+  grep -qF 'campus is hidden from the internet, run ./lab host show campus first' "$WORK/err"
+}
+
+test_host_hide_stops_the_connector_and_names_a_site_still_answering() {
+  local host
+  LAB_TUNNEL_ZONE=zone.example
+  mkdir -p "$LAB_SEATS_STATE/seat01" "$LAB_SEATS_STATE/seat02"
+  printf 'campus\n' >"$LAB_SEATS_STATE/seat01/host"
+  printf 'campus\n' >"$LAB_SEATS_STATE/seat02/host"
+  ! (
+    host_load() { :; }
+    pve_ssh() {
+      printf '%s\n' "$1" >>"$FAKE/ssh-calls"
+      [[ "$1" != "systemctl is-enabled"* ]] || printf 'enabled\n'
+    }
+    host_public_status() {
+      printf '%s\n' "$1" >>"$FAKE/probed"
+      [[ "$1" == https://team02.* ]] && printf '200' || printf '530'
+    }
+    host_hide_one campus
+  ) 2>"$WORK/err" || return 1
+  grep -qxF 'systemctl disable --now --quiet talos-lab-cloudflared' "$FAKE/ssh-calls" || return 1
+  for host in auth pve0 omni01 kube01 shell01 omni02 kube02 shell02 team01 team02; do
+    grep -qxF "https://$host.zone.example/" "$FAKE/probed" || return 1
+  done
+  grep -qF 'team02 (200) still answer' "$WORK/err"
+}
+
+test_seat_omnictl_runs_again_when_its_forward_drops_and_prints_one_result() {
+  local out
+  mkdir -p "$WORK/omni-bin" "$LAB_SEATS_STATE/seat01"
+  printf 'key\n' >"$LAB_SEATS_STATE/seat01/omni-service-account.key"
+  cat >"$WORK/omni-bin/omnictl" <<'EOF'
+#!/bin/sh
+runs=$(cat "$FAKE/omni-runs" 2>/dev/null || echo 0)
+echo $((runs + 1)) >"$FAKE/omni-runs"
+if [ "$runs" = 0 ]; then
+  echo partial
+  echo 'dial tcp 127.0.0.1:18080: connect: connection refused' >&2
+  exit 1
+fi
+echo "done $*"
+EOF
+  chmod 755 "$WORK/omni-bin/omnictl"
+  out="$(
+    SEAT=01 SEAT_STATE="$LAB_SEATS_STATE/seat01"
+    host_omnictl_local() { printf '%s' "$WORK/omni-bin/omnictl"; }
+    seat_omni_forward_open() { SEAT_OMNI_FORWARD=http://127.0.0.1:1; }
+    seat_omni_forward_close() { touch "$FAKE/reopened"; }
+    pve_ssh_forward_alive() { [[ "$(cat "$FAKE/omni-runs" 2>/dev/null)" != 1 || -e "$FAKE/reopened" ]]; }
+    seat_omnictl get clusters -o json 2>"$WORK/err"
+  )" || return 1
+  [[ "$out" == "done get clusters -o json" && "$(cat "$FAKE/omni-runs")" == 2 ]] || return 1
+  grep -qF 'dropped during omnictl get clusters, running it again' "$WORK/err" || return 1
+  ! grep -qF 'connection refused' "$WORK/err"
+}
+
+test_seat_omnictl_reports_a_failure_on_a_live_forward_once() {
+  local status=0
+  mkdir -p "$WORK/omni-bin" "$LAB_SEATS_STATE/seat01"
+  printf 'key\n' >"$LAB_SEATS_STATE/seat01/omni-service-account.key"
+  printf '#!/bin/sh\necho run >>"$FAKE/omni-runs"\necho "NotFound" >&2\nexit 3\n' >"$WORK/omni-bin/omnictl"
+  chmod 755 "$WORK/omni-bin/omnictl"
+  (
+    SEAT=01 SEAT_STATE="$LAB_SEATS_STATE/seat01"
+    host_omnictl_local() { printf '%s' "$WORK/omni-bin/omnictl"; }
+    seat_omni_forward_open() { SEAT_OMNI_FORWARD=http://127.0.0.1:1; }
+    pve_ssh_forward_alive() { :; }
+    seat_omnictl delete link x
+  ) 2>"$WORK/err" || status=$?
+  [[ "$status" == 3 && "$(grep -c . "$FAKE/omni-runs")" == 1 ]] || return 1
+  grep -qxF 'NotFound' "$WORK/err"
+}
+
 passed=0
 failed=0
 for name in $(declare -F | awk '{print $3}' | grep '^test_'); do

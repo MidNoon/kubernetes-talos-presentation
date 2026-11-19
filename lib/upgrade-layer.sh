@@ -46,6 +46,7 @@ upgrade_sync() {
 seat_upgrade() {
   local url t0 count
   rehearsal_load "$1"
+  host_require_shown
   rehearsal_use_cluster
   count="$(upgrade_node_states | grep -c "talos=$LAB_TALOS_VERSION kubelet=$LAB_KUBERNETES_VERSION ready=True schedulable$" || true)"
   ((count == ${#SEAT_VM_IDS[@]})) || die "$SEAT_NAME is not on Talos $LAB_TALOS_VERSION and Kubernetes $LAB_KUBERNETES_VERSION everywhere, run ./lab seat $SEAT reset and up first: $(upgrade_node_states | paste -sd';')"
