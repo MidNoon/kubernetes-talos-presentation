@@ -952,6 +952,82 @@ test_seat_omnictl_reports_a_failure_on_a_live_forward_once() {
   grep -qxF 'NotFound' "$WORK/err"
 }
 
+test_local_stop_shuts_the_vm_down_and_stops_an_unused_network() {
+  (
+    virt() {
+      printf '%s\n' "$*" >>"$FAKE/virt-calls"
+      case "$1" in
+        dominfo) return 0 ;;
+        domstate)
+          printf 'x\n' >>"$FAKE/domstate-calls"
+          if (($(grep -c . "$FAKE/domstate-calls") < 3)); then printf 'running\n'; else printf 'shut off\n'; fi
+          ;;
+        list) printf 'unrelated-vm\n' ;;
+        net-info) printf 'Name: talos-lab\nActive: yes\n' ;;
+      esac
+    }
+    sleep() { :; }
+    local_stop campus
+  ) 2>"$WORK/err" || return 1
+  grep -qxF 'shutdown talos-lab-campus' "$FAKE/virt-calls" || return 1
+  ! grep -qE '^destroy ' "$FAKE/virt-calls" || return 1
+  grep -qxF 'net-destroy talos-lab' "$FAKE/virt-calls" || return 1
+  grep -qF 'talos-lab-campus shut off, ./lab local up campus starts it again' "$WORK/err"
+}
+
+test_local_stop_keeps_the_network_while_another_lab_vm_runs() {
+  (
+    virt() {
+      printf '%s\n' "$*" >>"$FAKE/virt-calls"
+      case "$1" in
+        domstate) printf 'shut off\n' ;;
+        list) printf 'talos-lab-other\n' ;;
+        net-info) printf 'Active: yes\n' ;;
+      esac
+    }
+    local_stop campus
+  ) 2>/dev/null || return 1
+  ! grep -qE '^(shutdown|net-destroy) ' "$FAKE/virt-calls"
+}
+
+test_a_stopped_local_host_is_refused_with_the_way_to_start_it() {
+  mkdir -p "$HOST_STATE/local"
+  ! (
+    virt() { [[ "$1" != domstate ]] || printf 'shut off\n'; }
+    local_require_running
+  ) 2>"$WORK/err" || return 1
+  grep -qF 'campus runs as talos-lab-campus on this machine, which is not running. ./lab local up campus starts it' "$WORK/err" || return 1
+  rmdir "$HOST_STATE/local"
+  (virt() { return 1; }; local_require_running)
+}
+
+test_local_drop_seed_ejects_a_volume_listed_by_name_and_leaves_an_empty_drive() {
+  (
+    virt() {
+      printf '%s\n' "$*" >>"$FAKE/virt-calls"
+      case "$1" in
+        domblklist) printf 'vda      campus.qcow2\nsda      seed-campus.iso\n' ;;
+        change-media) [[ "$*" != *--live* ]] ;;
+        vol-info) return 1 ;;
+      esac
+    }
+    local_drop_seed
+  ) || return 1
+  grep -qxF 'change-media talos-lab-campus sda --eject --config' "$FAKE/virt-calls" || return 1
+  : >"$FAKE/virt-calls"
+  (
+    virt() {
+      printf '%s\n' "$*" >>"$FAKE/virt-calls"
+      case "$1" in
+        domblklist) printf 'vda      campus.qcow2\nsda      -\n' ;;
+        vol-info) return 1 ;;
+      esac
+    }
+    local_drop_seed
+  ) || return 1
+  ! grep -qE '^change-media ' "$FAKE/virt-calls"
+}
+
 passed=0
 failed=0
 for name in $(declare -F | awk '{print $3}' | grep '^test_'); do

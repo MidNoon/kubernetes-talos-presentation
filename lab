@@ -30,7 +30,7 @@ usage: lab hosts
        lab access ssh <host> [command...]
        lab campus <host> [ssh|proxmox open|close]
        lab campus <host> close|reset
-       lab local up|down <host>
+       lab local up|stop|down <host>
        lab host install <host>
        lab host up|verify|hide|show|down [host]
        lab seats create <count>|delete
@@ -101,6 +101,7 @@ main() {
       lab_lock "$*"
       case "$2" in
         up) local_up "$3" ;;
+        stop) local_stop "$3" ;;
         down) local_down "$3" ;;
         *) usage ;;
       esac

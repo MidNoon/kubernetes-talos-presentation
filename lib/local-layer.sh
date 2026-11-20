@@ -11,6 +11,7 @@ readonly LOCAL_MEMORY_GIB=36
 readonly LOCAL_VCPUS=12
 readonly LOCAL_DISK_GIB=300
 readonly LOCAL_ACCESS_TIMEOUT=900
+readonly LOCAL_STOP_TIMEOUT=600
 readonly LOCAL_PRIVATE_RANGES=(10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16)
 
 LOCAL_STATE="$LAB_STATE/local"
@@ -25,6 +26,16 @@ local_domain() {
 
 local_dir() {
   printf '%s/local' "$HOST_STATE"
+}
+
+local_running_domains() {
+  virt list --name | grep -E '^talos-lab-' || true
+}
+
+local_require_running() {
+  [[ -d "$(local_dir)" ]] || return 0
+  [[ "$(virt domstate "$(local_domain)" 2>/dev/null)" == running ]] ||
+    die "$HOST_NAME runs as $(local_domain) on this machine, which is not running. ./lab local up $HOST_NAME starts it"
 }
 
 local_preflight() {
@@ -263,7 +274,7 @@ local_wait_access() {
 }
 
 local_drop_seed() {
-  if virt domblklist "$(local_domain)" | awk '{print $2}' | grep -qxF "/var/lib/libvirt/images/$LOCAL_POOL/seed-$HOST_NAME.iso"; then
+  if virt domblklist "$(local_domain)" | awk '$1 == "sda" && $2 != "-" {found = 1} END {exit !found}'; then
     virt change-media "$(local_domain)" sda --eject --live --config >/dev/null 2>&1 || virt change-media "$(local_domain)" sda --eject --config >/dev/null
   fi
   if virt vol-info --pool "$LOCAL_POOL" "seed-$HOST_NAME.iso" >/dev/null 2>&1; then
@@ -272,7 +283,7 @@ local_drop_seed() {
 }
 
 local_up() {
-  local host="$1" identity
+  local host="$1" identity next
   lab_load_config
   host_select "$host"
   CF_ACCESS_INDEX="$HOST_INDEX"
@@ -287,6 +298,8 @@ local_up() {
   if ! virt dominfo "$(local_domain)" >/dev/null 2>&1; then
     local_build_seed
     local_define_vm
+  elif ! virt vol-info --pool "$LOCAL_POOL" "seed-$HOST_NAME.iso" >/dev/null 2>&1; then
+    local_drop_seed
   fi
   if [[ "$(virt domstate "$(local_domain)")" != running ]]; then
     virt start "$(local_domain)" >/dev/null
@@ -294,8 +307,33 @@ local_up() {
   fi
   local_wait_access
   local_drop_seed
-  identity="$(pve_ssh 'printf "%s, %s" "$(hostname)" "$(. /etc/os-release && printf %s "$PRETTY_NAME")"')" || die "could not run a command on $HOST_NAME"
-  log "$HOST_NAME runs as $(local_domain) on this machine: $identity, reached through $(cf_access_hostname). Next: ./lab host install $HOST_NAME"
+  identity="$(pve_ssh 'printf "%s, %s" "$(hostname)" "$(. /etc/os-release && printf %s "$PRETTY_NAME")"; if command -v pveversion >/dev/null; then printf ", %s" "$(pveversion)"; fi')" ||
+    die "could not run a command on $HOST_NAME"
+  next=". Next: ./lab host install $HOST_NAME"
+  [[ "$identity" != *pve-manager/* ]] || next=""
+  log "$HOST_NAME runs as $(local_domain) on this machine: $identity, reached through $(cf_access_hostname)$next"
+}
+
+local_stop() {
+  local host="$1" deadline state
+  lab_load_config
+  host_select "$host"
+  virt dominfo "$(local_domain)" >/dev/null 2>&1 || die "$HOST_NAME has no virtual machine $(local_domain) on this machine"
+  if [[ "$(virt domstate "$(local_domain)")" == running ]]; then
+    virt shutdown "$(local_domain)" >/dev/null
+    log "$(local_domain) shutting down, its Proxmox stops the seats' containers and VMs first"
+    deadline=$((SECONDS + LOCAL_STOP_TIMEOUT))
+    until state="$(virt domstate "$(local_domain)")" && [[ "$state" == "shut off" ]]; do
+      ((SECONDS < deadline)) ||
+        die "$(local_domain) is still $state ${LOCAL_STOP_TIMEOUT}s after it was asked to shut down. Its console: virsh -c qemu:///system console $(local_domain), root password in $(local_dir)/root-password"
+      sleep 5
+    done
+  fi
+  log "$(local_domain) shut off, ./lab local up $HOST_NAME starts it again"
+  if [[ -z "$(local_running_domains)" && "$(virt net-info "$LOCAL_NET" 2>/dev/null | awk '/^Active:/ {print $2}')" == yes ]]; then
+    virt net-destroy "$LOCAL_NET" >/dev/null
+    log "libvirt network $LOCAL_NET stopped, because no lab VM runs on it"
+  fi
 }
 
 local_other_domains() {

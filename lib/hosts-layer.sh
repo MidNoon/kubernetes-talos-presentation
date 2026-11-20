@@ -40,6 +40,7 @@ host_select() {
 host_load() {
   lab_load_config
   host_select "$1"
+  local_require_running
   mkdir -p "$SHARED_STATE" "$LAB_SEATS_STATE"
   pve_load_target || exit 1
 }
